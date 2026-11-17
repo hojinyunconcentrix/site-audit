@@ -312,10 +312,12 @@ function oneCheckKey(url, kind) {
 function paintOneSaved() {
   const list = document.querySelector("#one-saved");
   const save = document.querySelector("#one-save");
+  const clear = document.querySelector("#one-clear");
   if (save) save.disabled = !onePayload;
   if (!list) return;
   list.replaceChildren();
   const items = loadOneChecks();
+  if (clear) clear.disabled = !items.length;
   if (!items.length) {
     const li = document.createElement("li");
     li.className = "empty";
@@ -448,7 +450,6 @@ function renderList(job) {
     menuBox.replaceChildren();
   }
   paintTree(job);
-  if (!reviewWasHalted(job)) startAssetChecks(pagesWithMain(job));
 }
 
 function paintFilters(job) {
@@ -2124,6 +2125,8 @@ function saveRecent(job) {
   loadRecent();
 }
 
+let reviewAfterCollect = false;
+
 async function poll(id) {
   const response = await fetch(`/api/audits/${id}`);
   if (!response.ok) {
@@ -2134,17 +2137,21 @@ async function poll(id) {
   const job = await response.json();
   if (job.url) showListPage(job.url);
   if (job.status === "running") {
+    reviewAfterCollect = true;
     showRunning(job.progress);
     window.setTimeout(() => poll(id), 400);
     return;
   }
   setBusy(false);
+  const beginReview = reviewAfterCollect;
+  reviewAfterCollect = false;
   if (job.status === "error") {
     showListError(job.message);
     return;
   }
   renderList(job);
   saveRecent(job);
+  if (beginReview && !reviewWasHalted(job)) startAssetChecks(pagesWithMain(job));
 }
 
 function compareSide(title, urls, checks) {
@@ -2670,6 +2677,19 @@ document.querySelector("#one-save").addEventListener("click", () => {
   saveOneCheck(onePayload);
 });
 
+const oneClear = document.querySelector("#one-clear");
+if (oneClear) {
+  oneClear.addEventListener("click", () => {
+    if (!loadOneChecks().length) return;
+    const ok = window.confirm(
+      "이 브라우저에 저장한 검수 내역을 모두 삭제할까요?",
+    );
+    if (!ok) return;
+    writeOneChecks([]);
+    paintOneSaved();
+  });
+}
+
 if (deleteAnalysis) {
   deleteAnalysis.addEventListener("click", () => {
     const id = deleteAnalysis.dataset.id;
@@ -2799,30 +2819,6 @@ function paintLiveReview() {
   barReviewId = (job && job.id) || barReviewId;
 }
 
-function paintSavedReview(progress) {
-  const job = progress.job;
-  runningBar.hidden = false;
-  runningTitle.textContent = "검수 중";
-  runningDetail.textContent = `${job.url || ""} · 페이지 ${progress.done}/${progress.total}`;
-  runningMeter.hidden = false;
-  runningFill.style.width = `${Math.min(100, Math.round((progress.done / Math.max(progress.total, 1)) * 100))}%`;
-  runningOpen.hidden = false;
-  runningOpen.href = `/lists/saved/${job.id}`;
-  runningOpen.textContent = "결과 보기";
-  runningStop.hidden = false;
-  runningStop.disabled = false;
-  runningStop.textContent = "중지";
-  barReviewId = job.id || "";
-}
-
-function latestOpenReview() {
-  const item = loadAnalyses()[0];
-  if (!item || item.reviewHalted) return null;
-  const review = reviewSnapshot(item);
-  if (!review.total || review.done >= review.total) return null;
-  return { job: item, done: review.done, total: review.total };
-}
-
 function paintIdle() {
   if (assetHalted) {
     paintAssetHalt();
@@ -2830,11 +2826,6 @@ function paintIdle() {
   }
   if (assetActive && assetTotal) {
     paintLiveReview();
-    return;
-  }
-  const pending = latestOpenReview();
-  if (pending) {
-    paintSavedReview(pending);
     return;
   }
   runningBar.hidden = false;
@@ -2898,7 +2889,8 @@ function paintFinished(job) {
     job.status === "done" &&
     !assetHalted &&
     !reviewWasHalted(job) &&
-    (assetActive || review.done < review.total);
+    assetActive &&
+    review.done < review.total;
   if (reviewOpen) {
     const done = assetActive ? assetDone : review.done;
     const total = assetActive ? assetTotal : review.total;

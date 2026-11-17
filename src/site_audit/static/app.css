@@ -687,7 +687,9 @@ button.kpi-recheck { justify-self: start; margin: 0; font-size: 12px; font-weigh
 #one-result-place:empty { display: none; }
 
 #one-save:disabled,
-#one-save:disabled:hover {
+#one-save:disabled:hover,
+#one-clear:disabled,
+#one-clear:disabled:hover {
   opacity: 0.45;
   background: var(--bg-100);
   cursor: default;
