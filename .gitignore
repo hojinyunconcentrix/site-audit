@@ -1,0 +1,54 @@
+# Copied-project gitignore (applied by scripts/new_project.py).
+# AI/agent tooling stays local — do not commit to your product repo.
+.gitignore.project
+.vscode/settings.json.project
+.vscode/settings.json
+
+# Secrets and local env
+.env
+.env.local
+.env.*.local
+
+# Agent host dirs (Cursor / Claude Code / Codex / Antigravity)
+.cursor/
+.claude/
+.agents/
+.codex/
+.cursorignore
+
+# AI protocol entrypoints (template copies; local only)
+AGENTS.md
+CLAUDE.md
+TEMPLATE.md
+
+# Phase gate, hooks, handoff (AI workflow)
+.githooks/
+scripts/gate.sh
+scripts/gate.cmd
+scripts/gate.ps1
+scripts/_gate_cli.py
+scripts/_phase_gate_check.py
+scripts/_verify_phase_gate.py
+scripts/cursor_hook.py
+scripts/handoff_session_context.py
+scripts/install-hooks.sh
+scripts/install-hooks.cmd
+scripts/install-hooks.ps1
+scripts/install_hooks.py
+scripts/phase-gate-check.sh
+scripts/new-project.sh
+scripts/new-project.cmd
+scripts/new-project.ps1
+scripts/new_project.py
+scripts/lib/
+
+# AI workflow docs (product docs under docs/ stay tracked)
+docs/ai/
+
+# Dependencies / build (fill per project)
+node_modules/
+dist/
+build/
+coverage/
+__pycache__/
+*.pyc
