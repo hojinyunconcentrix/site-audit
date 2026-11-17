@@ -194,6 +194,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/static/app.js":
             self._send(200, (STATIC / "app.js").read_bytes(), "text/javascript; charset=utf-8")
             return
+        if path == "/static/xlsx.js":
+            self._send(200, (STATIC / "xlsx.js").read_bytes(), "text/javascript; charset=utf-8")
+            return
         if path == "/api/audits/current":
             with _lock:
                 running = next((job for job in _jobs.values() if job.get("status") == "running"), None)

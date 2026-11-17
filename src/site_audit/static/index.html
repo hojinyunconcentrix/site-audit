@@ -101,9 +101,26 @@
             </div>
             <section class="card recent" id="recent-card">
               <div class="card-head">
-                <h2>최근 검사</h2>
-                <p class="caption">이 브라우저에만 남습니다.</p>
+                <div>
+                  <h2>최근 검사</h2>
+                  <p class="caption">
+                    이 브라우저에만 남습니다. 엑셀로 내려받거나 다시 올릴 수
+                    있습니다.
+                  </p>
+                </div>
+                <div class="card-actions">
+                  <button id="excel-upload" class="text-btn" type="button">
+                    엑셀 업로드
+                  </button>
+                  <input
+                    id="excel-file"
+                    type="file"
+                    accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    hidden
+                  />
+                </div>
               </div>
+              <p id="excel-status" class="status" hidden></p>
               <ul id="recent"></ul>
             </section>
           </main>
@@ -128,14 +145,24 @@
             <div class="card">
               <div class="card-head">
                 <h2>하위 페이지</h2>
-                <button
-                  id="delete-analysis"
-                  class="text-btn"
-                  type="button"
-                  hidden
-                >
-                  이 분석 삭제
-                </button>
+                <div class="card-actions">
+                  <button
+                    id="excel-download"
+                    class="text-btn"
+                    type="button"
+                    hidden
+                  >
+                    엑셀 다운로드
+                  </button>
+                  <button
+                    id="delete-analysis"
+                    class="text-btn"
+                    type="button"
+                    hidden
+                  >
+                    이 분석 삭제
+                  </button>
+                </div>
               </div>
               <p id="status" class="status" aria-live="polite"></p>
               <div id="tree" class="tree"></div>
@@ -150,6 +177,9 @@
                   <h2>검수한 내역</h2>
                   <p class="caption">이 브라우저에만 남습니다.</p>
                 </div>
+                <button id="one-clear" class="text-btn" type="button" disabled>
+                  전체 삭제
+                </button>
               </div>
               <ul id="one-saved"></ul>
             </section>
@@ -211,6 +241,7 @@
         <button id="page-loading-stop" class="primary" type="button">중지</button>
       </div>
     </div>
+    <script src="/static/xlsx.js"></script>
     <script src="/static/app.js"></script>
   </body>
 </html>
