@@ -1,0 +1,11 @@
+{
+  "path_contains": {
+    "Insights": ["/insights", "/lg-experience", "/blog/"],
+    "PLP": [],
+    "PDP": []
+  },
+  "ufn_marker": "",
+  "thumbnail_min_width": null,
+  "thumbnail_min_height": null,
+  "plp_count_pattern": ""
+}

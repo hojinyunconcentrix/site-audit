@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>사이트 분석</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css"
+    />
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="gnb">
+        <a class="brand" href="/">
+          <span class="brand-name">사이트 분석</span>
+        </a>
+        <nav class="side-nav" aria-label="검수">
+          <a class="side-link is-current" data-view="one" href="/"
+            >url 하나 검수</a
+          >
+          <a class="side-link" data-view="search" href="/all">하위전체 검수</a>
+        </nav>
+        <button
+          class="icon-btn"
+          id="nav-toggle"
+          type="button"
+          aria-label="메뉴 열기"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h16M4 12h16M4 17h16" />
+          </svg>
+        </button>
+      </header>
+      <div class="backdrop" id="backdrop"></div>
+      <div class="workspace">
+        <form id="form">
+          <header class="topbar">
+            <div class="topbar-main">
+            <label class="search" for="url">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="11" cy="11" r="6" />
+                <path d="m16 16 4 4" />
+              </svg>
+              <span class="sr">검사할 주소</span>
+              <input
+                id="url"
+                name="url"
+                type="url"
+                inputmode="url"
+                autocomplete="url"
+                placeholder="https://example.com"
+                required
+              />
+            </label>
+            <fieldset class="kind-pick" id="kind-pick">
+              <legend class="sr">유형</legend>
+              <label><input type="radio" name="page-kind" value="일반" checked /> 일반</label>
+              <label><input type="radio" name="page-kind" value="PLP" /> PLP</label>
+              <label><input type="radio" name="page-kind" value="PDP" /> PDP</label>
+              <label><input type="radio" name="page-kind" value="Insights" /> Insights</label>
+            </fieldset>
+            <button id="start" class="primary" type="submit">검수하기</button>
+            </div>
+            <label class="compare-url" id="compare-url-field" hidden>
+              <span>비교 주소</span>
+              <input
+                id="compare-url"
+                type="url"
+                inputmode="url"
+                autocomplete="url"
+                placeholder="https://example.com"
+              />
+            </label>
+          </header>
+          <section id="running" class="running">
+            <div class="running-head">
+              <p id="running-title" class="running-title">
+                진행 중인 수집 없음
+              </p>
+              <div class="running-actions">
+                <a id="running-open" href="/" hidden>목록 화면</a>
+                <button id="running-stop" type="button" disabled>중지</button>
+              </div>
+            </div>
+            <p id="running-detail">
+              수집이 시작되면 주소와 진행이 여기에 표시됩니다.
+            </p>
+            <span class="meter" id="running-meter" hidden
+              ><span id="running-fill"></span
+            ></span>
+          </section>
+          <p id="form-status" class="alert" hidden></p>
+          <main id="home" class="content">
+            <div class="page-head">
+              <h1>하위전체 검수</h1>
+              <p class="crumb">
+                사이트 분석 <span aria-hidden="true">›</span> 하위전체 검수
+              </p>
+            </div>
+            <section class="card recent" id="recent-card">
+              <div class="card-head">
+                <h2>최근 검사</h2>
+                <p class="caption">이 브라우저에만 남습니다.</p>
+              </div>
+              <ul id="recent"></ul>
+            </section>
+          </main>
+        </form>
+        <main id="list-page" class="content" hidden>
+          <div class="page-head">
+            <div>
+              <p class="back-row">
+                <a class="back" href="/all">하위전체 검수</a>
+              </p>
+              <h1>하위 페이지</h1>
+              <p id="list-root" class="lead"></p>
+              <p id="list-place" class="place">언어와 나라를 확인하는 중</p>
+            </div>
+            <p class="crumb">
+              사이트 분석 <span aria-hidden="true">›</span> 하위전체 검수
+            </p>
+          </div>
+          <section id="panel" hidden>
+            <div id="summary" class="kpi-grid"></div>
+            <div id="list-compare" class="compare-blocks" hidden></div>
+            <div class="card">
+              <div class="card-head">
+                <h2>하위 페이지</h2>
+                <button
+                  id="delete-analysis"
+                  class="text-btn"
+                  type="button"
+                  hidden
+                >
+                  이 분석 삭제
+                </button>
+              </div>
+              <p id="status" class="status" aria-live="polite"></p>
+              <div id="tree" class="tree"></div>
+            </div>
+          </section>
+        </main>
+        <main id="view-one" class="content" hidden>
+          <div class="one-split">
+            <section class="card recent one-pane" id="one-saved-card">
+              <div class="card-head">
+                <div>
+                  <h2>검수한 내역</h2>
+                  <p class="caption">이 브라우저에만 남습니다.</p>
+                </div>
+              </div>
+              <ul id="one-saved"></ul>
+            </section>
+            <section class="card one-pane" id="one-result">
+              <div class="card-head">
+                <div>
+                  <h2>검수 결과</h2>
+                  <p id="one-result-place" class="caption"></p>
+                </div>
+                <button id="one-save" class="text-btn" type="button" disabled>
+                  저장하기
+                </button>
+              </div>
+              <div id="one-result-body">
+                <p class="empty">검수 결과가 여기에 표시됩니다.</p>
+              </div>
+            </section>
+          </div>
+        </main>
+        <main id="view-compare" class="content" hidden>
+          <div class="page-head">
+            <div>
+              <h1>gnb/fnb 비교</h1>
+              <p id="compare-place" class="place">
+                한 페이지의 GNB 링크와 FNB 링크를 비교합니다.
+              </p>
+            </div>
+            <p class="crumb">
+              사이트 분석 <span aria-hidden="true">›</span> gnb/fnb 비교
+            </p>
+          </div>
+          <p id="compare-status" class="status" aria-live="polite"></p>
+          <section id="compare-result" hidden>
+            <div id="compare-summary" class="kpi-grid"></div>
+            <div id="compare-blocks" class="compare-blocks"></div>
+          </section>
+        </main>
+      </div>
+    </div>
+    <div id="link-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-close></div>
+      <div
+        class="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="link-modal-title"
+      >
+        <div class="modal-head">
+          <h2 id="link-modal-title">broken link</h2>
+          <button class="text-btn" type="button" data-close>닫기</button>
+        </div>
+        <div id="link-modal-body"></div>
+      </div>
+    </div>
+    <div id="page-loading" class="page-loading" hidden>
+      <div class="page-loading-card" role="status" aria-live="polite">
+        <p class="running-title">검수 중</p>
+        <p id="page-loading-detail"></p>
+        <button id="page-loading-stop" class="primary" type="button">중지</button>
+      </div>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
