@@ -16,7 +16,7 @@
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-단위 테스트는 `tests/test_audit.py`와 `tests/test_fetch.py`. 네트워크 없이 주소 거부, 하위 페이지, 깨진 이미지, UFN 기준 없음, 호스트 호출 간격과 차단 중단을 확인한다.
+단위 테스트는 `tests/test_audit.py`, `tests/test_fetch.py`, `tests/test_excel_book.py`. 네트워크 없이 주소 거부, 하위 페이지, 깨진 이미지, UFN 기준 없음, 호스트 호출 간격과 차단 중단, 엑셀 시트 왕복을 확인한다.
 
 ## Unit Tests
 

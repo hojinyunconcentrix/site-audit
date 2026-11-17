@@ -533,7 +533,7 @@ button.kpi.is-on {
 button.kpi-recheck { justify-self: start; margin: 0; font-size: 12px; font-weight: 700; }
 
 #summary.filters {
-  grid-template-columns: repeat(7, minmax(96px, 1fr));
+  grid-template-columns: repeat(8, minmax(96px, 1fr));
   overflow-x: auto;
 }
 
@@ -558,7 +558,7 @@ button.kpi-recheck { justify-self: start; margin: 0; font-size: 12px; font-weigh
 
 .card-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 20px 20px 8px;
@@ -652,6 +652,13 @@ button.kpi-recheck { justify-self: start; margin: 0; font-size: 12px; font-weigh
 .text-btn:hover { background: var(--bg-200); }
 
 .card-head .text-btn { margin: 0; }
+
+.card-actions {
+  display: flex;
+  flex: none;
+  gap: 8px;
+  align-items: center;
+}
 
 .one-split {
   display: grid;
@@ -795,6 +802,8 @@ button.tree-step:hover { color: var(--contents-000); }
 .badge.active { color: var(--role-green); background: var(--bg-role-green); }
 .badge.discontinued { color: var(--role-red); background: var(--bg-role-red); }
 .badge.outside-gnb { color: var(--role-blue); background: var(--bg-role-blue); }
+.badge.unchecked { color: #9a6700; background: var(--bg-role-yellow); }
+.page-table tr.is-unchecked td { background: var(--bg-highlight); }
 .badge.window-ok { color: var(--role-green); background: var(--bg-role-green); }
 .badge.window-missing { color: var(--role-red); background: var(--bg-role-red); }
 .mark-o, .mark-x { display: inline-block; min-width: 1.2em; font-weight: 700; text-align: center; }

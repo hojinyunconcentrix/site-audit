@@ -11,6 +11,7 @@ const status = document.querySelector("#status");
 const tree = document.querySelector("#tree");
 const listPlace = document.querySelector("#list-place");
 const deleteAnalysis = document.querySelector("#delete-analysis");
+const excelDownload = document.querySelector("#excel-download");
 const recent = document.querySelector("#recent");
 const STORE = "site-audit-analyses";
 const ONE_STORE = "site-audit-one";
@@ -166,6 +167,7 @@ function showFormError(message) {
 
 function showListError(message) {
   showListPage("");
+  if (excelDownload) excelDownload.hidden = true;
   panel.hidden = false;
   summary.replaceChildren();
   tree.replaceChildren();
@@ -179,6 +181,7 @@ function showListError(message) {
 }
 
 function showRunning(progress) {
+  if (excelDownload) excelDownload.hidden = true;
   showListPage(
     progress && progress.root ? progress.root : listRoot.textContent,
   );
@@ -416,6 +419,7 @@ function renderList(job) {
     deleteAnalysis.hidden = !job.id;
     deleteAnalysis.dataset.id = job.id || "";
   }
+  if (excelDownload) excelDownload.hidden = !(job && job.url);
   listedJob = job;
   const jobKey = job.id || job.url || "";
   if (jobKey !== listedJobId) {
@@ -467,6 +471,7 @@ function paintFilters(job) {
     ["Insights", kinds.Insights, "green"],
     ["기타", kinds["기타"], "purple"],
     ["오류", (job.pages || []).filter(pageHasRed).length, "coral"],
+    ["미검수", uncheckedCount(job), "amber"],
   ];
   summary.classList.add("filters");
   summary.replaceChildren();
@@ -476,16 +481,18 @@ function paintFilters(job) {
       hint:
         label === "전체"
           ? "모두 보기"
-          : label === "오류"
+          :         label === "오류"
             ? "검수 열만"
-            : "이 유형만",
+            : label === "미검수"
+              ? "결과 없는 페이지만"
+              : "이 유형만",
       onClick: () => {
         listFilter = label;
         paintFilters(job);
         paintTree(job);
       },
     };
-    if (label !== "기타" && label !== "오류")
+    if (label !== "기타" && label !== "오류" && label !== "미검수")
       options.onRecheck = () => recheckFilter(label, job);
     summary.append(kpiCard(label, value, tone, options));
   }
@@ -541,9 +548,41 @@ function pageHasRed(page) {
   return checkHasRed(storedChecks.get(page.url));
 }
 
+function reviewNode(page) {
+  if (isGnbHeader(page) && listedJob && listedJob.url) return mainCheckNode(listedJob);
+  return page;
+}
+
+function pageUnchecked(page) {
+  const node = reviewNode(page);
+  if (!node || !node.url || !assetPage(node)) return false;
+  return !storedChecks.has(node.url);
+}
+
+function uncheckedCount(job) {
+  const seen = new Set();
+  let count = 0;
+  for (const page of pagesWithMain(job || {})) {
+    if (!assetPage(page) || !page.url || seen.has(page.url)) continue;
+    seen.add(page.url);
+    if (!storedChecks.has(page.url)) count += 1;
+  }
+  return count;
+}
+
+function clearUncheckedMark(url) {
+  for (const mark of tree.querySelectorAll(".badge.unchecked")) {
+    if (mark.dataset.url !== url) continue;
+    const row = mark.closest("tr");
+    if (row) row.classList.remove("is-unchecked");
+    mark.remove();
+  }
+}
+
 function pageMatches(page) {
   if (listFilter === "전체") return true;
   if (listFilter === "오류") return pageHasRed(page);
+  if (listFilter === "미검수") return pageUnchecked(page);
   return displayKind(page) === listFilter;
 }
 
@@ -644,7 +683,9 @@ function paintTree(job) {
       empty.textContent =
         listFilter === "오류"
           ? "빨간색으로 표시된 페이지가 없습니다."
-          : "이 유형의 페이지가 없습니다.";
+          : listFilter === "미검수"
+            ? "검수 결과가 없는 페이지가 없습니다."
+            : "이 유형의 페이지가 없습니다.";
       tree.append(empty);
     }
     return;
@@ -1329,8 +1370,9 @@ function rememberCheck(url, payload) {
   storedChecks.set(url, payload);
   persistListedChecks();
   if (!listedJob) return;
+  clearUncheckedMark(url);
   paintFilters(listedJob);
-  if (listFilter === "오류") paintTree(listedJob);
+  if (listFilter === "오류" || listFilter === "미검수") paintTree(listedJob);
 }
 
 function applyAsset(slot, payload) {
@@ -1953,6 +1995,14 @@ function pageTable(items, job) {
         stopped.textContent = inactive ? "Discontinued" : "Active";
         name.append(stopped);
       }
+      if (checking.url && assetPage(checking) && !storedChecks.has(checking.url)) {
+        line.classList.add("is-unchecked");
+        const pending = document.createElement("span");
+        pending.className = "badge unchecked";
+        pending.dataset.url = checking.url;
+        pending.textContent = "미검수";
+        name.append(pending);
+      }
       const itemCell = document.createElement("td");
       const itemKind = displayKind(checking);
       if (itemKind) {
@@ -2037,6 +2087,461 @@ function pageTable(items, job) {
   return wrap;
 }
 
+const EXCEL_LIMIT = 20 * 1024 * 1024;
+
+function showExcelNote(message) {
+  const line = document.querySelector("#excel-status");
+  if (line && home && !home.hidden) {
+    line.hidden = !message;
+    line.textContent = message || "";
+  }
+  if (!message || !listPage || listPage.hidden) return;
+  const note = document.createElement("span");
+  note.textContent = message;
+  if (status.childNodes.length) status.append(document.createElement("br"));
+  status.append(note);
+}
+
+function newAnalysisId() {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function analysisFromJob(job) {
+  const saved =
+    loadAnalyses().find((item) => item.id && job.id && item.id === job.id) ||
+    null;
+  const base = Object.assign(
+    {},
+    (saved && saved.checks) || {},
+    job.checks || {},
+  );
+  const checks =
+    listedJobId && job.id === listedJobId ? mergedChecks(base) : base;
+  const record = {
+    id: (saved && saved.id) || job.id || "",
+    url: job.url || (saved && saved.url) || "",
+    when: (saved && saved.when) || job.when || "",
+    language: job.language || (saved && saved.language) || "",
+    country: job.country || (saved && saved.country) || "",
+    childCount: job.childCount || (job.pages || []).length,
+    notes: job.notes || (saved && saved.notes) || [],
+    pages: job.pages || (saved && saved.pages) || [],
+    menuDiff: job.menuDiff || (saved && saved.menuDiff) || null,
+    checks,
+  };
+  if ((saved && saved.reviewHalted) || job.reviewHalted) record.reviewHalted = true;
+  return record;
+}
+
+function ratioLines(views, totalKey, rowKey) {
+  return shownViews(views)
+    .map((view) => {
+      if (view.unread) return `${view.name} 확인 실패`;
+      const rows = (view[rowKey] || []).length;
+      const total = Number.isFinite(view[totalKey]) ? view[totalKey] : rows;
+      return `${view.name} ${total}/${rows}`;
+    })
+    .join("\n");
+}
+
+function itemQuantityText(page, payload) {
+  const kind = displayKind(page);
+  if (payload && payload.status === 404) return "404";
+  if (kind && kind !== "PLP") return "해당 없음";
+  const hasPayload =
+    payload && Object.prototype.hasOwnProperty.call(payload, "itemCount");
+  const value = hasPayload ? payload.itemCount : page.itemCount;
+  if (!Number.isFinite(value)) {
+    if (hasPayload) return "확인 실패";
+    return Number.isFinite(page.itemCount) ? String(page.itemCount) : "";
+  }
+  const skus =
+    payload && Array.isArray(payload.itemSkus) ? payload.itemSkus : page.itemSkus;
+  if (!Array.isArray(skus)) return String(value);
+  const products = skus.map(skuProduct).filter(Boolean);
+  const listedStopped = products.filter((item) => item.discontinued).length;
+  const stopped = screenCount(payload, page, "discontinuedCount") ?? listedStopped;
+  const active =
+    screenCount(payload, page, "activeCount") ?? Math.max(0, value - listedStopped);
+  const all =
+    screenCount(payload, page, "activeCount") != null &&
+    screenCount(payload, page, "discontinuedCount") != null
+      ? screenCount(payload, page, "activeCount") +
+        screenCount(payload, page, "discontinuedCount")
+      : value;
+  const parts = siblingParts(products, siblingTotal(payload, page));
+  return [
+    `Active - ${active + parts.active}(${active}/${parts.active})`,
+    `Discontinued - ${stopped + parts.discontinued}(${stopped}/${parts.discontinued})`,
+    `All - ${all + parts.all}(${all}/${parts.all})`,
+  ].join("\n");
+}
+
+function languageText(record, payload) {
+  if (payload && payload.status === 404) return "";
+  const pageLanguage = payload && String(payload.language || "").trim();
+  const rootLanguage = String((record && record.language) || "").trim();
+  if (!pageLanguage || !rootLanguage) return "";
+  return pageLanguage === rootLanguage
+    ? `같음 ${pageLanguage}`
+    : `다름 ${pageLanguage}`;
+}
+
+function areaText(kind, applies, payload) {
+  if (payload && payload.status === 404) return "404";
+  if (!kind) return "";
+  return applies ? "" : "해당 없음";
+}
+
+function resultRows(record) {
+  const rows = [[
+    "단계",
+    "메뉴",
+    "주소",
+    "상위",
+    "유형",
+    "아이템 수량 (item/sibling)",
+    "언어",
+    "UFN",
+    "Dimension",
+    "broken link",
+    "broken image",
+    "Thumbnail",
+    "중복",
+    "새창",
+    "페이지 상태",
+    "GNB 없음",
+    "표시",
+  ]];
+  const checks = record.checks || {};
+  for (const page of record.pages || []) {
+    const main = isGnbHeader(page);
+    const checking = main ? mainCheckNode(record) : page;
+    const payload = checking.url ? checks[checking.url] : null;
+    const kind = displayKind(checking);
+    const listing = payload && payload.listing;
+    const insightList = kind === "Insights" && checking.url && isInsightListing(checking.url);
+    let thumb = "";
+    let dup = "";
+    if (payload && payload.status === 404 && insightList) {
+      thumb = "404";
+      dup = "404";
+    } else if (insightList) {
+      thumb = listing
+        ? shownViews(listing.thumbnails)
+            .map((view) => {
+              if (view.unread) return `${view.name} 확인 실패`;
+              const different = (view.different || []).length;
+              const total = Number.isFinite(view.total) ? view.total : different;
+              return `${view.name} ${total}/${different}`;
+            })
+            .join("\n")
+        : "";
+      const copies = listing ? listing.duplicates || [] : [];
+      const total =
+        listing && Number.isFinite(listing.contentTotal)
+          ? listing.contentTotal
+          : copies.length;
+      dup = listing ? `전체 ${total}/${copies.length}` : "";
+    } else if (kind === "PLP" || kind === "Insights") {
+      thumb = "해당 없음";
+      dup = "해당 없음";
+    }
+    rows.push([
+      Number.isFinite(page.depth) ? page.depth : "",
+      main ? "메인" : page.title || page.url || "항목",
+      checking.url || "",
+      page.parent || "",
+      kind,
+      itemQuantityText(checking, payload),
+      languageText(record, payload),
+      areaText(kind, kind === "PDP", payload),
+      areaText(kind, kind === "PDP", payload),
+      payload && payload.viewports
+        ? ratioLines(payload.viewports, "linkTotal", "brokenLinks")
+        : payload && payload.status === 404
+          ? "404"
+          : "",
+      payload && payload.viewports
+        ? ratioLines(payload.viewports, "imageTotal", "missingImages")
+        : payload && payload.status === 404
+          ? "404"
+          : "",
+      thumb,
+      dup,
+      page.blank ? (page.missing ? "404" : "새창") : "",
+      payload && payload.status === 404 ? "404" : "",
+      page.outsideGnb ? "예" : "",
+      page.discontinued ? "Discontinued" : page.product ? "Active" : "",
+    ]);
+  }
+  return rows;
+}
+
+function summaryRows(record) {
+  return [
+    ["항목", "값"],
+    ["주소", record.url || ""],
+    ["언어", record.language || ""],
+    ["나라", record.country || ""],
+    ["검사 시각", record.when || ""],
+    ["하위 페이지 수", (record.pages || []).length],
+    ["메모", (record.notes || []).join("\n")],
+    ["검수 중단", record.reviewHalted ? "예" : "아니오"],
+  ];
+}
+
+function menuRows(diff) {
+  const rows = [["구분", "메뉴", "경로", "GNB", "FNB", "주소"]];
+  if (!diff) return rows;
+  for (const row of differentMenuRows(diff.sameLabel)) {
+    rows.push([
+      "같은 메뉴, 다른 주소",
+      row.label || "",
+      Array.isArray(row.path) ? row.path.join(" > ") : "",
+      (row.gnb || []).join("\n"),
+      (row.fnb || []).join("\n"),
+      "",
+    ]);
+  }
+  for (const row of diff.gnbOnly || []) {
+    rows.push(["GNB에만", row.label || "", "", "", "", row.url || ""]);
+  }
+  for (const row of diff.fnbOnly || []) {
+    rows.push(["FNB에만", row.label || "", "", "", "", row.url || ""]);
+  }
+  return rows;
+}
+
+function chunkText(text) {
+  const size = 20000;
+  const rows = [["부분"]];
+  for (let index = 0; index < text.length; index += size) {
+    rows.push([text.slice(index, index + size)]);
+  }
+  return rows;
+}
+
+function workbookFor(record) {
+  return [
+    { name: "요약", rows: summaryRows(record) },
+    { name: "결과", rows: resultRows(record) },
+    { name: "메뉴차이", rows: menuRows(record.menuDiff) },
+    { name: "원본", rows: chunkText(JSON.stringify(record)) },
+  ];
+}
+
+function excelFileName(record) {
+  return SiteXlsx.fileName(record);
+}
+
+async function downloadAnalysis(record) {
+  if (!globalThis.SiteXlsx) throw new Error("엑셀을 만들지 못했습니다.");
+  const bytes = await SiteXlsx.writeWorkbook(workbookFor(record));
+  const blob = new Blob([bytes], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = excelFileName(record);
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(link.href);
+}
+
+function plainValue(value, depth) {
+  if (depth > 14) return null;
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string") return value.slice(0, 200000);
+  if (Array.isArray(value)) {
+    return value.slice(0, 20000).map((item) => plainValue(item, depth + 1));
+  }
+  if (typeof value === "object") {
+    const copy = Object.create(null);
+    for (const key of Object.keys(value).slice(0, 400)) {
+      if (key === "__proto__" || key === "constructor" || key === "prototype")
+        continue;
+      copy[key] = plainValue(value[key], depth + 1);
+    }
+    return copy;
+  }
+  return null;
+}
+
+function cleanPage(page) {
+  const source = plainValue(page, 0) || {};
+  const next = {
+    url: String(source.url || ""),
+    kind: String(source.kind || ""),
+    depth: Number.isFinite(source.depth) ? source.depth : 1,
+    parent: String(source.parent || ""),
+    title: String(source.title || ""),
+    group: String(source.group || ""),
+    discontinued: Boolean(source.discontinued),
+    product: Boolean(source.product),
+    outsideGnb: Boolean(source.outsideGnb),
+    id: String(source.id || ""),
+    blank: Boolean(source.blank),
+    missing: Boolean(source.missing),
+  };
+  if (Number.isFinite(source.itemCount)) next.itemCount = source.itemCount;
+  if (Array.isArray(source.itemSkus)) next.itemSkus = source.itemSkus;
+  if (Number.isFinite(source.siblingCount)) next.siblingCount = source.siblingCount;
+  if (Number.isFinite(source.activeCount)) next.activeCount = source.activeCount;
+  if (Number.isFinite(source.discontinuedCount)) {
+    next.discontinuedCount = source.discontinuedCount;
+  }
+  return next;
+}
+
+function httpUrl(value) {
+  try {
+    const url = new URL(String(value || "").trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    return String(value || "").trim();
+  } catch (_err) {
+    return "";
+  }
+}
+
+function acceptAnalysis(raw) {
+  const source = plainValue(raw, 0);
+  const url = httpUrl(source && source.url);
+  if (!url) throw new Error("엑셀에서 검사 주소를 찾지 못했습니다.");
+  const pages = Array.isArray(source.pages)
+    ? source.pages.slice(0, 20000).map(cleanPage)
+    : [];
+  const checks =
+    source.checks && typeof source.checks === "object" ? source.checks : {};
+  const id = /^[a-z0-9]+$/.test(source.id || "") ? source.id : newAnalysisId();
+  const record = {
+    id,
+    url,
+    when:
+      String(source.when || "").slice(0, 80) ||
+      new Date().toLocaleString("ko-KR", { hour12: false }),
+    language: String(source.language || "").slice(0, 80),
+    country: String(source.country || "").slice(0, 80),
+    childCount: pages.length,
+    notes: Array.isArray(source.notes)
+      ? source.notes.map((note) => String(note)).slice(0, 20)
+      : [],
+    pages,
+    menuDiff:
+      source.menuDiff && typeof source.menuDiff === "object"
+        ? source.menuDiff
+        : null,
+    checks,
+  };
+  if (source.reviewHalted) record.reviewHalted = true;
+  return record;
+}
+
+function sheetText(rows) {
+  if (!rows || !rows.length) return "";
+  const start = String(rows[0][0] || "") === "부분" ? 1 : 0;
+  return rows
+    .slice(start)
+    .map((row) => String((row && row[0]) || ""))
+    .join("");
+}
+
+function analysisFromBook(book) {
+  const text = sheetText(book && book.sheets && book.sheets["원본"]);
+  if (text.trim()) {
+    try {
+      return acceptAnalysis(JSON.parse(text));
+    } catch (error) {
+      if (error && error.message && error.message.startsWith("엑셀에서")) throw error;
+      throw new Error("엑셀의 검수 원본을 읽지 못했습니다.");
+    }
+  }
+  const table = book && book.sheets && book.sheets["결과"];
+  if (!table || !table.length) {
+    throw new Error("하위전체 검수 결과가 없는 파일입니다.");
+  }
+  const header = table[0] || [];
+  const map = new Map();
+  header.forEach((name, index) => map.set(String(name || "").trim(), index));
+  const summary = (book.sheets && book.sheets["요약"]) || [];
+  const values = {};
+  for (const row of summary.slice(1)) {
+    if (row && row[0]) values[String(row[0])] = row[1] || "";
+  }
+  const pick = (row, name) => {
+    const index = map.get(name);
+    if (index === undefined || row[index] === undefined || row[index] === null) {
+      return "";
+    }
+    return String(row[index]);
+  };
+  const pages = [];
+  for (const row of table.slice(1)) {
+    const title = pick(row, "메뉴");
+    const url = httpUrl(pick(row, "주소"));
+    if (!title && !url) continue;
+    const depth = Number(pick(row, "단계"));
+    const windowMark = pick(row, "새창");
+    const state = pick(row, "표시");
+    pages.push({
+      url,
+      title: title === "메인" ? "GNB" : title,
+      kind: pick(row, "유형"),
+      parent: pick(row, "상위"),
+      depth: Number.isFinite(depth) && depth > 0 ? depth : 1,
+      group: title === "메인" ? "GNB" : "",
+      id: title === "메인" ? "group:GNB" : "",
+      outsideGnb: pick(row, "GNB 없음") === "예",
+      blank: windowMark === "새창" || windowMark === "404",
+      missing: windowMark === "404" || pick(row, "페이지 상태") === "404",
+      discontinued: state === "Discontinued",
+      product: state === "Active" || state === "Discontinued",
+    });
+  }
+  return acceptAnalysis({
+    url: values["주소"] || (pages.find((page) => page.url) || {}).url || "",
+    language: values["언어"] || "",
+    country: values["나라"] || "",
+    when: values["검사 시각"] || "",
+    notes: values["메모"] ? String(values["메모"]).split("\n") : [],
+    reviewHalted: values["검수 중단"] === "예",
+    pages,
+    checks: {},
+    menuDiff: null,
+  });
+}
+
+function storeImported(record) {
+  const key = normalizeUrl(record.url);
+  const items = [
+    record,
+    ...loadAnalyses().filter((item) => normalizeUrl(item.url) !== key),
+  ];
+  writeAnalyses(items);
+  if (!loadAnalyses().some((item) => item.id === record.id)) {
+    throw new Error(
+      "이 브라우저에 결과를 저장하지 못했습니다. 최근 검사를 지운 뒤 다시 올려 주세요.",
+    );
+  }
+  loadRecent();
+}
+
+async function importExcelFile(file) {
+  if (!file) return;
+  if (!globalThis.SiteXlsx) throw new Error("엑셀을 열 수 없습니다.");
+  if (file.size > EXCEL_LIMIT) throw new Error("엑셀은 20MB 이하만 올릴 수 있습니다.");
+  const name = String(file.name || "").toLowerCase();
+  if (name && !name.endsWith(".xlsx")) throw new Error("xlsx 파일만 올릴 수 있습니다.");
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const record = analysisFromBook(await SiteXlsx.readWorkbook(bytes));
+  storeImported(record);
+  window.location.assign(`/lists/saved/${record.id}`);
+}
+
 function removeAnalysis(id) {
   writeAnalyses(loadAnalyses().filter((item) => item.id !== id));
   loadRecent();
@@ -2087,7 +2592,16 @@ function loadRecent() {
       if (window.location.pathname === `/lists/saved/${item.id}`)
         window.location.assign("/all");
     });
-    li.append(button, remove);
+    const excel = document.createElement("button");
+    excel.type = "button";
+    excel.className = "text-btn";
+    excel.textContent = "엑셀";
+    excel.addEventListener("click", () => {
+      downloadAnalysis(item).catch((error) => {
+        showExcelNote((error && error.message) || "엑셀을 만들지 못했습니다.");
+      });
+    });
+    li.append(button, excel, remove);
     recent.append(li);
   }
 }
@@ -2696,6 +3210,30 @@ if (deleteAnalysis) {
     if (!id) return;
     removeAnalysis(id);
     window.location.assign("/all");
+  });
+}
+
+if (excelDownload) {
+  excelDownload.addEventListener("click", () => {
+    if (!listedJob) return;
+    downloadAnalysis(analysisFromJob(listedJob)).catch((error) => {
+      showExcelNote((error && error.message) || "엑셀을 만들지 못했습니다.");
+    });
+  });
+}
+
+const excelUpload = document.querySelector("#excel-upload");
+const excelFile = document.querySelector("#excel-file");
+if (excelUpload && excelFile) {
+  excelUpload.addEventListener("click", () => excelFile.click());
+  excelFile.addEventListener("change", () => {
+    const file = excelFile.files && excelFile.files[0];
+    excelFile.value = "";
+    if (!file) return;
+    showExcelNote("");
+    importExcelFile(file).catch((error) => {
+      showExcelNote((error && error.message) || "엑셀을 올리지 못했습니다.");
+    });
   });
 }
 
