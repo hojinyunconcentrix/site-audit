@@ -1,7 +1,9 @@
 """리다이렉트마다 주소를 다시 검사하고, 확인한 IP로만 연결한다.
 
 같은 호스트는 동시에 두 연결만 열고, 요청 시작 사이에는 간격을 둔다.
-403·429·503이면 Retry-After만큼 쉰 뒤 한 번만 다시 보내고, 또 막히면 그 호스트는 멈춘다.
+403·429·503이면 Retry-After만큼 쉰 뒤 한 번만 다시 보낸다. 429가 또 오거나 403·503이
+연달아 세 번 막히면 그 호스트를 잠시 멈췄다가 다시 연다. 시간 초과와 연결 실패도 한 번 다시 보낸다.
+본문이 필요 없는 확인은 헤더만 읽고 끊는다.
 """
 
 from __future__ import annotations
@@ -16,17 +18,21 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
 from site_audit.guard import Target, UrlRejected, check_url
 
 USER_AGENT = "site-audit/0.1"
 MAX_REDIRECTS = 5
 MAX_BYTES = 2_000_000
-TIMEOUT = 8
+CONNECT_TIMEOUT = 8
+TIMEOUT = 20
 HOST_GAP = 0.4
 HOST_INFLIGHT = 2
 HOST_PAUSE = 15.0
+BLOCK_PAUSE = 5.0
+HOST_STRIKES = 3
+HOST_COOLDOWN = 60.0
 BLOCK_STATUSES = frozenset({403, 429, 503})
 BLOCK_MESSAGE = "이 호스트가 요청을 제한했습니다."
 
@@ -104,6 +110,45 @@ def _auth_header(headers: dict | None) -> str:
     return ""
 
 
+def _ascii_request_target(path: str) -> str:
+    """요청 줄은 ASCII만 된다. 주소에 섞인 문자는 UTF-8 퍼센트로 보낸다."""
+    text = path or "/"
+    if text.isascii():
+        return text
+    return "".join(ch if ord(ch) < 128 else quote(ch, safe="") for ch in text)
+
+
+def _ascii_host(host: str) -> str:
+    if host.isascii():
+        return host
+    return host.encode("idna").decode("ascii")
+
+
+def _request_bytes(
+    target: Target,
+    method: str,
+    body: bytes = b"",
+    headers: dict | None = None,
+) -> bytes:
+    request_path = _ascii_request_target(target.path or "/")
+    header_host = _ascii_host(target.hostname)
+    if (target.scheme == "https" and target.port != 443) or (
+        target.scheme == "http" and target.port != 80
+    ):
+        header_host = f"{header_host}:{target.port}"
+    extra = _auth_header(headers)
+    if body:
+        extra += f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n"
+    return (
+        f"{method} {request_path} HTTP/1.1\r\n"
+        f"Host: {header_host}\r\n"
+        f"User-Agent: {USER_AGENT}\r\n"
+        "Accept: application/json,text/html,*/*;q=0.8\r\n"
+        "Connection: close\r\n"
+        f"{extra}\r\n"
+    ).encode("ascii") + (body or b"")
+
+
 def _request(
     target: Target,
     method: str,
@@ -111,29 +156,13 @@ def _request(
     body: bytes = b"",
     headers: dict | None = None,
 ) -> tuple[int, list[tuple[str, str]], bytes]:
-    sock = socket.create_connection((target.ip, target.port), timeout=TIMEOUT)
+    payload = _request_bytes(target, method, body, headers)
+    sock = socket.create_connection((target.ip, target.port), timeout=CONNECT_TIMEOUT)
     try:
         if target.scheme == "https":
             context = _ssl_context()
             sock = context.wrap_socket(sock, server_hostname=target.hostname)
         sock.settimeout(TIMEOUT)
-        request_path = target.path or "/"
-        header_host = target.hostname
-        if (target.scheme == "https" and target.port != 443) or (
-            target.scheme == "http" and target.port != 80
-        ):
-            header_host = f"{target.hostname}:{target.port}"
-        extra = _auth_header(headers)
-        if body:
-            extra += f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n"
-        payload = (
-            f"{method} {request_path} HTTP/1.1\r\n"
-            f"Host: {header_host}\r\n"
-            f"User-Agent: {USER_AGENT}\r\n"
-            "Accept: application/json,text/html,*/*;q=0.8\r\n"
-            "Connection: close\r\n"
-            f"{extra}\r\n"
-        ).encode("ascii") + (body or b"")
         sock.sendall(payload)
         chunks = []
         total = 0
@@ -143,6 +172,9 @@ def _request(
                 break
             chunks.append(block)
             total += len(block)
+            # 상태와 헤더만 필요하면 본문은 받지 않는다.
+            if not read_body and b"\r\n\r\n" in b"".join(chunks[-2:]):
+                break
         raw = b"".join(chunks)
     finally:
         try:
@@ -166,12 +198,24 @@ def _request(
 
 
 class HostPacer:
-    """호스트마다 동시 연결과 요청 간격을 지키고, 막히면 그 호스트를 닫는다."""
+    """호스트마다 동시 연결과 요청 간격을 지키고, 계속 막히면 그 호스트를 잠시 닫는다."""
 
-    def __init__(self, *, gap: float = HOST_GAP, inflight: int = HOST_INFLIGHT, clock=None, sleep=None, max_pause: float = HOST_PAUSE):
+    def __init__(
+        self,
+        *,
+        gap: float = HOST_GAP,
+        inflight: int = HOST_INFLIGHT,
+        clock=None,
+        sleep=None,
+        max_pause: float = HOST_PAUSE,
+        strikes: int = HOST_STRIKES,
+        cooldown: float = HOST_COOLDOWN,
+    ):
         self.gap = gap
         self.inflight = inflight
         self.max_pause = max_pause
+        self.strikes = strikes
+        self.cooldown = cooldown
         self._clock = clock or time.monotonic
         self._sleep = sleep or time.sleep
         self._lock = threading.Lock()
@@ -183,19 +227,30 @@ class HostPacer:
 
     def any_closed(self) -> bool:
         with self._lock:
-            return any(state.get("closed") for state in self._hosts.values())
+            now = self._clock()
+            return any(self._closed(state, now) for state in self._hosts.values())
 
     def _state(self, host: str) -> dict:
-        return self._hosts.setdefault(host, {"next": 0.0, "open": 0, "closed": False})
+        return self._hosts.setdefault(host, {"next": 0.0, "open": 0, "closed": False, "until": 0.0, "strikes": 0})
+
+    def _closed(self, state: dict, now: float) -> bool:
+        if not state["closed"]:
+            return False
+        if now < state["until"]:
+            return True
+        # 쉬는 시간이 지나면 다시 연다. 또 막히면 바로 닫는다.
+        state["closed"] = False
+        state["strikes"] = max(0, self.strikes - 1)
+        return False
 
     def acquire(self, host: str) -> str:
         host = (host or "").lower()
         while True:
             with self._lock:
                 state = self._state(host)
-                if state["closed"]:
-                    return BLOCK_MESSAGE
                 now = self._clock()
+                if self._closed(state, now):
+                    return BLOCK_MESSAGE
                 if state["open"] < self.inflight and now >= state["next"]:
                     state["open"] += 1
                     state["next"] = now + self.gap
@@ -213,14 +268,22 @@ class HostPacer:
             state = self._state(host)
             state["open"] = max(0, state["open"] - 1)
             if status not in BLOCK_STATUSES:
+                if status:
+                    state["strikes"] = 0
                 return ""
-            pause = 1.0 if retry_after is None else max(0.0, retry_after)
+            pause = BLOCK_PAUSE if retry_after is None else max(0.0, retry_after)
             pause = min(pause, self.max_pause)
-            state["next"] = max(state["next"], self._clock() + pause)
+            now = self._clock()
+            state["next"] = max(state["next"], now + pause)
             if can_retry:
                 return "retry"
-            state["closed"] = True
-            return "stop"
+            # 403·503은 그 주소만 막힌 것일 수 있어 연달아 막힐 때만 호스트를 닫는다.
+            state["strikes"] += 1
+            if status == 429 or state["strikes"] >= self.strikes:
+                state["closed"] = True
+                state["until"] = now + self.cooldown
+                return "stop"
+            return "blocked"
 
 
 _PACER = HostPacer()
@@ -285,6 +348,7 @@ def fetch(
         except UrlRejected as exc:
             return HttpResult(url=current, status=0, content_type="", body=b"", error=exc.message)
         attempt = 0
+        resent = False
         while True:
             blocked = gate.acquire(target.hostname)
             if blocked:
@@ -293,12 +357,23 @@ def fetch(
                 status, response_headers, received = send(
                     target, "POST" if payload else method, read_body, payload, auth
                 )
-            except (TimeoutError, socket.timeout):
+            except OSError as exc:
                 gate.finish(target.hostname, 0, None, can_retry=False)
-                return HttpResult(url=target.url, status=0, content_type="", body=b"", error="시간 초과")
-            except OSError:
+                if not resent:
+                    resent = True
+                    continue
+                slow = isinstance(exc, (TimeoutError, socket.timeout))
+                return HttpResult(
+                    url=target.url, status=0, content_type="", body=b"",
+                    error="시간 초과" if slow else "연결 실패",
+                )
+            except Exception:
+                # 주소 인코딩 실패가 연결 칸을 붙잡으면 다음 검수가 끝나지 않는다.
                 gate.finish(target.hostname, 0, None, can_retry=False)
-                return HttpResult(url=target.url, status=0, content_type="", body=b"", error="연결 실패")
+                return HttpResult(
+                    url=target.url, status=0, content_type="", body=b"",
+                    error="이 주소는 요청할 수 없습니다.",
+                )
             decision = gate.finish(
                 target.hostname,
                 status,
@@ -308,7 +383,7 @@ def fetch(
             if decision == "retry":
                 attempt += 1
                 continue
-            if decision == "stop":
+            if decision in ("stop", "blocked"):
                 return HttpResult(
                     url=target.url,
                     status=status,

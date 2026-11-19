@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -29,9 +30,37 @@ from site_audit.parse import (
     breadcrumbs,
     plp_targets,
     wa_type_links,
+    selling_spec_rows,
+    spec_sections,
+    rival_spec_rows,
+    diff_spec_rows,
+    spec_check_sections,
+    energy_sheet_from_rows,
 )
 
 MAX_PAGES = 50
+ASSET_KEEP = 600.0
+
+# 정상으로 확인한 링크·이미지는 잠시 기억해, 페이지마다 같은 메뉴 링크를 다시 부르지 않는다.
+# 깨졌거나 확인하지 못한 주소는 기억하지 않아 다시 검수하면 새로 확인한다.
+_asset_seen: dict[tuple[str, bool], float] = {}
+_asset_lock = threading.Lock()
+
+
+def _asset_known(url: str, image: bool) -> bool:
+    with _asset_lock:
+        at = _asset_seen.get((url, image))
+        return at is not None and time.monotonic() - at < ASSET_KEEP
+
+
+def _asset_remember(url: str, image: bool) -> None:
+    with _asset_lock:
+        _asset_seen[(url, image)] = time.monotonic()
+
+
+def forget_assets() -> None:
+    with _asset_lock:
+        _asset_seen.clear()
 MAX_DEPTH = 2
 MAX_LINKS = 40
 MAX_IMAGES = 20
@@ -1107,7 +1136,46 @@ def _thumbnail_views(items: list[dict], page_url: str, request) -> list[dict]:
     return views
 
 
-def check_page_assets(root: str, *, rules: dict | None = None, fetch_one=None, resolve=None, kind: str | None = None) -> dict:
+def _with_scheme(url: str) -> str:
+    text = (url or "").strip()
+    if not text or re.match(r"^[a-z][a-z0-9+.-]*:", text, re.I):
+        return text
+    return "https://" + text.lstrip("/")
+
+
+def _spec_compare_page(compare_url: str, source_html: str, request, resolve) -> dict:
+    """비교 주소의 펼친 스펙과 All Spec이 다른 항목만 돌려준다."""
+    raw = _with_scheme(compare_url)
+    empty = {"ok": False, "url": raw, "sourceFound": False, "compareFound": False, "rows": []}
+    try:
+        kwargs = {"resolve": resolve} if resolve is not None else {}
+        target = check_url(raw, **kwargs)
+    except UrlRejected as exc:
+        return {**empty, "message": exc.message}
+    page = request(target.url)
+    if getattr(page, "error", "") == BLOCK_MESSAGE:
+        return {**empty, "url": target.url, "message": BLOCK_MESSAGE}
+    if page.status == 404 or page.error or not (200 <= page.status <= 299):
+        return {**empty, "url": page.url or target.url, "message": "비교 주소를 읽지 못했습니다."}
+    compare_html = decode_html(page.body, page.content_type)
+    source_rows = selling_spec_rows(source_html)
+    rival_rows = rival_spec_rows(compare_html)
+    source_found = source_rows is not None
+    compare_found = rival_rows is not None
+    rows = diff_spec_rows(source_rows or [], rival_rows or []) if source_found and compare_found else []
+    sections = spec_check_sections(source_rows or [], rival_rows or []) if source_found and compare_found else []
+    return {
+        "ok": True,
+        "url": page.url or target.url,
+        "sourceFound": source_found,
+        "compareFound": compare_found,
+        "rows": rows,
+        "sections": sections,
+        "energySheet": energy_sheet_from_rows(source_html, rival_rows or [], compare_html),
+    }
+
+
+def check_page_assets(root: str, *, rules: dict | None = None, fetch_one=None, resolve=None, kind: str | None = None, compare_url: str | None = None) -> dict:
     """한 페이지를 화면 폭마다 읽어 깨진 링크, 없는 이미지, 깨진 이미지를 나눈다."""
     try:
         kwargs = {"resolve": resolve} if resolve is not None else {}
@@ -1143,8 +1211,6 @@ def check_page_assets(root: str, *, rules: dict | None = None, fetch_one=None, r
                 result = fetch_one(url)
         else:
             result = fetch(url, read_body=False, resolve=resolve)
-        if getattr(result, "error", "") == BLOCK_MESSAGE:
-            limited_hits.append(url)
         return result
 
     page = request(target.url)
@@ -1178,19 +1244,29 @@ def check_page_assets(root: str, *, rules: dict | None = None, fetch_one=None, r
         for url in assets["images"]:
             pending[url] = True
 
+    keep = fetch_one is None
+
     def one(item: tuple[str, bool]) -> tuple[str, str]:
         url, image = item
-        result = probe(url)
-        if result.error == BLOCK_MESSAGE:
-            return url, BLOCK_MESSAGE
-        return url, _asset_state(result, image=image)
+        if keep and _asset_known(url, image):
+            return url, ""
+        try:
+            result = probe(url)
+        except Exception:
+            # 주소 하나에서 난 오류로 페이지 검수 전체가 멈추지 않게 한다.
+            return url, ""
+        # 링크나 이미지 하나가 막힌 것은 그 주소만 확인하지 못한 것으로 두고, 페이지 검수는 이어 간다.
+        if result.error:
+            return url, ""
+        state = _asset_state(result, image=image)
+        if keep and not state and 200 <= result.status <= 299:
+            _asset_remember(url, image)
+        return url, state
 
     states: dict[str, str] = {}
     if pending:
         with ThreadPoolExecutor(max_workers=min(6, len(pending))) as pool:
             for url, detail in pool.map(one, pending.items()):
-                if detail == BLOCK_MESSAGE:
-                    return {"ok": False, "status": 429, "message": BLOCK_MESSAGE}
                 states[url] = detail
 
     viewports = []
@@ -1243,6 +1319,19 @@ def check_page_assets(root: str, *, rules: dict | None = None, fetch_one=None, r
             result["discontinuedCount"] = discontinued_count
     if limited_hits:
         return {"ok": False, "status": 429, "message": BLOCK_MESSAGE}
+    if chosen == "PDP":
+        source_rows = selling_spec_rows(html)
+        result["allSpec"] = {
+            "found": source_rows is not None,
+            "sections": spec_sections(source_rows),
+        }
+        result["energySheet"] = energy_sheet_from_rows(html, [])
+    if chosen == "PDP" and (compare_url or "").strip():
+        compared = _spec_compare_page(compare_url or "", html, request, resolve)
+        sheet = compared.pop("energySheet", None)
+        result["specCompare"] = compared
+        if sheet:
+            result["energySheet"] = sheet
     return result
 
 
@@ -1829,6 +1918,7 @@ def discover_pages(root: str, *, rules: dict | None = None, fetch_one=None, reso
     """입력한 주소 경로 아래만 모은다. 단계는 경로 깊이다."""
     if fetch_one is None:
         reset_host_limits()
+        forget_assets()
 
     page_cache: dict[str, HttpResult] = {}
 

@@ -264,7 +264,20 @@ class Handler(BaseHTTPRequestHandler):
             if kind is not None and kind not in ("일반", "PLP", "PDP", "Insights"):
                 self._json(400, {"message": "유형을 다시 선택해 주세요."})
                 return
-            checked = check_page_assets(url.strip(), kind=kind if isinstance(kind, str) else None)
+            compare_url = ""
+            if isinstance(payload, dict) and kind == "PDP":
+                raw_compare = payload.get("compareUrl", "")
+                if raw_compare is None:
+                    raw_compare = ""
+                if not isinstance(raw_compare, str):
+                    self._json(400, {"message": "비교 주소 형식이 올바르지 않습니다."})
+                    return
+                compare_url = raw_compare
+            checked = check_page_assets(
+                url.strip(),
+                kind=kind if isinstance(kind, str) else None,
+                compare_url=compare_url,
+            )
             if not checked.get("ok"):
                 self._json(400, {
                     "message": checked.get("message") or "이 주소는 검사할 수 없습니다.",
