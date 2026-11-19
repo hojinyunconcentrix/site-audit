@@ -341,17 +341,22 @@ function paintOneSaved() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "link";
+    const kind = payload.kind || "일반";
     const host = document.createElement("span");
-    host.textContent = payload.url || "주소 없음";
+    host.className = "saved-title";
+    const badge = document.createElement("span");
+    badge.className = `badge ${kindClass(kind)}`;
+    badge.textContent = kind;
+    const name = document.createElement("span");
+    const pageTitle = String(payload.title || "").trim();
+    name.textContent = pageTitle || payload.url || "주소 없음";
+    host.append(badge, name);
     const meta = document.createElement("span");
-    const compareUrl = compareUrlOf(payload);
-    meta.textContent = [
-      payload.kind || "일반",
-      compareUrl ? `비교 ${compareUrl}` : "",
-      item.when,
-    ]
+    const compareUrl = kind === "PDP" ? "" : compareUrlOf(payload);
+    meta.textContent = [compareUrl ? `비교 ${compareUrl}` : "", item.when]
       .filter(Boolean)
       .join(" · ");
+    if (payload.url) button.title = payload.url;
     button.append(host, meta);
     button.addEventListener("click", () => openSavedOne(item));
     const remove = document.createElement("button");

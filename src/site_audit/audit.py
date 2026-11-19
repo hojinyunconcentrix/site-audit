@@ -24,6 +24,7 @@ from site_audit.parse import (
     insight_endpoint,
     menu_listing,
     page_signals,
+    page_title,
     viewport_assets,
     api_page_kind,
     plp_list_query,
@@ -1295,6 +1296,7 @@ def check_page_assets(root: str, *, rules: dict | None = None, fetch_one=None, r
     result = {
         "ok": True,
         "url": page_url,
+        "title": page_title(html),
         "kind": chosen,
         "language": language,
         "country": country,
