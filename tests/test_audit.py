@@ -1708,5 +1708,311 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(listing["thumbnails"][2]["different"][0]["url"], "https://example.com/uk/business/insights/c/")
 
 
+class SpecCompareTests(unittest.TestCase):
+    def test_all_spec_diff_ignores_key_spec_and_collapsed_area(self):
+        from site_audit.parse import diff_spec_rows, rival_spec_rows, selling_spec_rows
+
+        source = """
+        <div class="c-compare-selling">
+          <button type="button">Key Spec</button>
+          <div class="c-compare-selling__spec">
+            <div class="c-compare-selling__spec-item">
+              <span class="c-compare-selling__spec-name">Screen Size</span>
+              <span class="c-compare-selling__spec-desc">65 inch</span>
+            </div>
+          </div>
+          <button type="button">All Spec</button>
+          <div class="c-compare-selling__spec">
+            <div class="c-compare-selling__spec-item">
+              <span class="c-compare-selling__spec-name">Screen Size</span>
+              <span class="c-compare-selling__spec-desc">65"</span>
+            </div>
+            <div class="c-compare-selling__spec-item">
+              <span class="c-compare-selling__spec-name">Resolution</span>
+              <span class="c-compare-selling__spec-desc">4K</span>
+            </div>
+            <div class="c-compare-selling__spec-item">
+              <span class="c-compare-selling__spec-name">HDMI</span>
+              <span class="c-compare-selling__spec-desc">2.1</span>
+            </div>
+          </div>
+        </div>
+        """
+        rival = """
+        <div class="tech-spacs-area collapse">
+          <table><tr><th>Screen Size</th><td>hidden</td></tr></table>
+        </div>
+        <div class="tech-specs-area collapse show">
+          <table>
+            <tr><th>DISPLAY</th></tr>
+            <tr><th>Screen Size</th><td>65 inch</td></tr>
+            <tr><th>Resolution</th><td>4k</td></tr>
+            <tr><th>HDMI</th><td>2.1</td></tr>
+            <tr><th>Speaker</th><td>40W</td></tr>
+          </table>
+        </div>
+        """
+        left = selling_spec_rows(source)
+        right = rival_spec_rows(rival)
+        self.assertEqual([row["value"] for row in left], ["65\"", "4K", "2.1"])
+        self.assertEqual(right[0]["name"], "Screen Size")
+        rows = {row["name"]: row for row in diff_spec_rows(left, right)}
+        self.assertEqual(rows["Screen Size"]["source"], "65\"")
+        self.assertEqual(rows["Screen Size"]["compare"], "65 inch")
+        self.assertNotIn("Resolution", rows)
+        self.assertNotIn("HDMI", rows)
+        self.assertEqual(rows["Speaker"]["source"], "")
+        self.assertEqual(rows["Speaker"]["compare"], "40W")
+
+    def test_compare_page_uses_all_spec_when_tech_area_is_absent(self):
+        from site_audit.parse import rival_spec_rows
+
+        html = """
+        <h3>All Spec</h3>
+        <div class="c-compare-selling__spec">
+          <div class="c-compare-selling__spec-item">
+            <span class="c-compare-selling__spec-name">Typ.</span>
+            <span class="c-compare-selling__spec-desc">130W</span>
+          </div>
+        </div>
+        """
+        rows = rival_spec_rows(html)
+        self.assertEqual(rows, [{"group": "", "name": "Typ.", "value": "130W"}])
+
+    def test_spec_compares_only_the_same_section(self):
+        from site_audit.parse import diff_spec_rows
+
+        different = diff_spec_rows(
+            [{"name": "Screen Size", "value": "65\"", "group": "PANEL"}],
+            [{"name": "Screen Size", "value": "55\"", "group": "INFO"}],
+        )
+        self.assertEqual(
+            sorted((row["source"], row["compare"]) for row in different),
+            [("", "55\""), ("65\"", "")],
+        )
+        same = diff_spec_rows(
+            [{"name": "Screen Size", "value": "65\"", "group": "PANEL"}],
+            [{"name": "Screen Size", "value": "55\"", "group": "PANEL"}],
+        )
+        self.assertEqual(same, [{
+            "name": "Screen Size",
+            "source": "65\"",
+            "compare": "55\"",
+        }])
+
+    def test_energy_grade_matches_erp_letter(self):
+        from site_audit.parse import diff_spec_rows, selling_spec_rows
+
+        source = """
+        <h3>All Spec</h3>
+        <div class="c-compare-selling__spec">
+          <h4>PANEL</h4>
+          <div class="c-compare-selling__spec-item">
+            <span class="c-compare-selling__spec-name">Screen Size</span>
+            <span class="c-compare-selling__spec-desc">65"</span>
+          </div>
+        </div>
+        <button>
+          <span class="sr-only">Energy Grade<!-- --> : <!-- -->D</span>
+        </button>
+        """
+        rival = """
+        <h3>All Spec</h3>
+        <div class="c-compare-selling__spec">
+          <h4>STANDARD</h4>
+          <div class="c-compare-selling__spec-item">
+            <span class="c-compare-selling__spec-name">ERP</span>
+            <span class="c-compare-selling__spec-desc">YES (D)</span>
+          </div>
+        </div>
+        """
+        rows = selling_spec_rows(source)
+        self.assertEqual([row["name"] for row in rows], ["Screen Size"])
+        from site_audit.parse import energy_sheet_from_rows, rival_spec_rows
+        sheet = energy_sheet_from_rows(source, rival_spec_rows(rival), rival)
+        self.assertEqual(sheet, {"source": "D", "compare": "D", "same": True})
+        labeled = rival.replace(
+            "</h3>",
+            """</h3>
+            <div class="file-list " data-file-download="true">
+              <a href="#">
+                <span class="label type-none">
+                  <img src="/energy-label/bg/bg_481088.png" alt="A+++">
+                </span>
+              </a>
+            </div>
+            """,
+        )
+        preferred = energy_sheet_from_rows(source, rival_spec_rows(labeled), labeled)
+        self.assertEqual(preferred["compare"], "A+++")
+        self.assertFalse(preferred["same"])
+        changed = source.replace("Energy Grade<!-- --> : <!-- -->D", "Energy Grade<!-- --> : <!-- -->G")
+        changed_sheet = energy_sheet_from_rows(changed, rival_spec_rows(rival))
+        self.assertEqual(changed_sheet, {"source": "G", "compare": "D", "same": False})
+
+    def test_all_spec_sections_follow_headings(self):
+        from site_audit.parse import selling_spec_rows, spec_sections
+
+        html = """
+        <h3>All Spec</h3>
+        <div class="c-compare-selling__spec">
+          <h4>PANEL</h4>
+          <div class="c-compare-selling__spec-item">
+            <span class="c-compare-selling__spec-name">Screen Size (Inch)</span>
+            <span class="c-compare-selling__spec-desc">65"</span>
+          </div>
+          <h4>CONNECTIVITY</h4>
+          <div class="c-compare-selling__spec-item">
+            <span class="c-compare-selling__spec-name">HDMI In</span>
+            <span class="c-compare-selling__spec-desc">Yes(3)</span>
+          </div>
+        </div>
+        """
+        sections = spec_sections(selling_spec_rows(html))
+        self.assertEqual(sections, [
+            {"title": "PANEL", "rows": [{"name": "Screen Size (Inch)", "value": "65\""}]},
+            {"title": "CONNECTIVITY", "rows": [{"name": "HDMI In", "value": "Yes(3)"}]},
+        ])
+
+    def test_two_item_spec_list_stays_separate(self):
+        from site_audit.parse import selling_spec_rows
+
+        html = """
+        <h3>All Spec</h3>
+        <div class="c-compare-selling__spec">
+          <div class="c-compare-selling__table">
+            <h4>SPECIAL FEATURE</h4>
+            <ul class="c-compare-selling__spec-list">
+              <li class="c-compare-selling__item">
+                <div class="c-compare-selling__spec-name"><p>Tilt (Face down)</p></div>
+                <div class="c-compare-selling__spec-desc"><p>Yes(Max 30º degree, 40ºC temperature)</p></div>
+              </li>
+              <li class="c-compare-selling__item">
+                <div class="c-compare-selling__spec-name"><p>Conformal Coating (Power Board)</p></div>
+                <div class="c-compare-selling__spec-desc"><p>Yes(Partial space coating)</p></div>
+              </li>
+            </ul>
+          </div>
+        </div>
+        """
+        rows = {row["name"]: row["value"] for row in selling_spec_rows(html)}
+        self.assertEqual(rows["Tilt (Face down)"], "Yes(Max 30º degree, 40ºC temperature)")
+        self.assertEqual(rows["Conformal Coating (Power Board)"], "Yes(Partial space coating)")
+
+    def test_spec_title_drops_parentheses_before_compare(self):
+        from site_audit.parse import diff_spec_rows
+
+        rows = diff_spec_rows(
+            [{"name": "Brightness (Typ.)", "value": "500 nit", "group": ""}],
+            [{"name": "Brightness", "value": "450 nit", "group": ""}],
+        )
+        self.assertEqual(rows, [{"name": "Brightness", "source": "500 nit", "compare": "450 nit"}])
+        same = diff_spec_rows(
+            [{"name": "Brightness (Typ.)", "value": "500 nit", "group": ""}],
+            [{"name": "Brightness (Typ)", "value": "500 nit", "group": ""}],
+        )
+        self.assertEqual(same, [])
+
+    def test_power_consumption_matches_heading_details(self):
+        from site_audit.parse import diff_spec_rows
+
+        source = [
+            {"group": "POWER CONSUMPTION", "name": "Typ.", "value": "130W"},
+            {"group": "POWER CONSUMPTION", "name": "Max.", "value": "205W"},
+            {"group": "POWER CONSUMPTION", "name": "BTU (British Thermal Unit)", "value": "444 BTU/Hr(Typ.), 699 BTU/Hr(Max)"},
+            {"group": "POWER CONSUMPTION", "name": "DPM", "value": "0.5W"},
+            {"group": "POWER CONSUMPTION", "name": "Power off", "value": "0.5W"},
+            {"group": "POWER CONSUMPTION", "name": "Smart Energy Saving (70%)", "value": "91W"},
+        ]
+        rival = [
+            {"group": "", "name": "Power Consumption (Typ.)", "value": "130W"},
+            {"group": "", "name": "Power Consumption (Max.)", "value": "200W"},
+            {"group": "", "name": "Power Consumption (British Thermal Unit)", "value": "444 BTU/Hr(Typ.), 699 BTU/Hr(Max)"},
+            {"group": "", "name": "Power Consumption (DPM)", "value": "0.5W"},
+            {"group": "", "name": "Power Consumption (Power Off)", "value": "0.5W"},
+            {"group": "", "name": "Power Consumption (Smart Energy Saving, ~70%)", "value": "91W"},
+        ]
+        rows = diff_spec_rows(source, rival)
+        self.assertEqual(rows, [{
+            "name": "Power Consumption (Max.)",
+            "source": "205W",
+            "compare": "200W",
+        }])
+        from site_audit.parse import spec_check_sections
+        sections = spec_check_sections(source, rival)
+        self.assertEqual([section["title"] for section in sections], ["POWER CONSUMPTION"])
+        by_name = {row["name"]: row for row in sections[0]["rows"]}
+        self.assertTrue(by_name["Typ."]["same"])
+        self.assertFalse(by_name["Max."]["same"])
+        self.assertEqual(by_name["Max."]["source"], "205W")
+        self.assertEqual(by_name["Max."]["compare"], "200W")
+
+    def test_slash_name_matches_either_variant(self):
+        from site_audit.parse import diff_spec_rows
+
+        same = diff_spec_rows(
+            [{"name": "SuperSign Control+", "value": "Yes", "group": ""}],
+            [{"name": "SuperSign Control / Control+", "value": "Yes", "group": ""}],
+        )
+        self.assertEqual(same, [])
+        changed = diff_spec_rows(
+            [{"name": "SuperSign Control+", "value": "No", "group": ""}],
+            [{"name": "SuperSign Control / Control+", "value": "Yes", "group": ""}],
+        )
+        self.assertEqual(changed, [{
+            "name": "SuperSign Control+",
+            "source": "No",
+            "compare": "Yes",
+        }])
+
+    def test_page_check_returns_spec_differences_for_pdp(self):
+        from site_audit.audit import check_page_assets
+
+        root = "https://example.com/uk/oled/"
+        other = "https://example.com/compare/oled/"
+        source = """
+        <html lang="en-GB">
+          <button>All Spec</button>
+          <div class="c-compare-selling__spec">
+            <dl><dt>Energy</dt><dd>A</dd></dl>
+          </div>
+        </html>
+        """
+        rival = """
+        <html>
+          <div class="tech-spacs-area collapse show">
+            <dl><dt>Energy</dt><dd>B</dd></dl>
+          </div>
+        </html>
+        """
+        pages = {root: source, other: rival}
+
+        def fake(url, read_body=True, body=None, headers=None):
+            text = pages.get(url)
+            if text is None:
+                return HttpResult(url=url, status=404, content_type="text/html", body=b"")
+            return HttpResult(url=url, status=200, content_type="text/html", body=text.encode())
+
+        def allow(url, resolve=None):
+            return type("T", (), {"url": url, "hostname": "example.com"})()
+
+        with patch("site_audit.audit.check_url", side_effect=allow):
+            checked = check_page_assets(root, rules={"path_contains": {}}, fetch_one=fake, kind="PDP", compare_url=other)
+            plain = check_page_assets(root, rules={"path_contains": {}}, fetch_one=fake, kind="일반", compare_url=other)
+            missing = check_page_assets(root, rules={"path_contains": {}}, fetch_one=fake, kind="PDP", compare_url="https://example.com/missing/")
+
+        self.assertEqual(checked["specCompare"]["rows"], [{"name": "Energy", "source": "A", "compare": "B"}])
+        self.assertEqual(checked["allSpec"]["sections"], [{
+            "title": "",
+            "rows": [{"name": "Energy", "value": "A"}],
+        }])
+        self.assertTrue(checked["specCompare"]["sourceFound"])
+        self.assertTrue(checked["specCompare"]["compareFound"])
+        self.assertNotIn("specCompare", plain)
+        self.assertFalse(missing["specCompare"]["ok"])
+        self.assertEqual(missing["specCompare"]["message"], "비교 주소를 읽지 못했습니다.")
+        self.assertTrue(missing["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

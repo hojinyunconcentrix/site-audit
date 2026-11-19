@@ -2,8 +2,9 @@ import threading
 import time
 import unittest
 
-from site_audit.audit import discover_pages
-from site_audit.http_fetch import BLOCK_MESSAGE, HostPacer, HttpResult, fetch
+from site_audit.audit import check_page_assets, discover_pages
+from site_audit.guard import Target
+from site_audit.http_fetch import BLOCK_MESSAGE, HostPacer, HttpResult, _request_bytes, fetch
 
 
 def _public_resolve(host, port, type=None):
@@ -89,6 +90,145 @@ class HostPaceTests(unittest.TestCase):
         self.assertEqual(blocked.error, BLOCK_MESSAGE)
         self.assertEqual(other.status, 200)
         self.assertIn("example.org", seen)
+
+    def test_one_forbidden_address_keeps_the_host_open(self):
+        clock = FakeClock()
+        pacer = HostPacer(gap=0, inflight=2, clock=clock.monotonic, sleep=clock.sleep)
+
+        def transport(target, method, read_body, body=b"", headers=None):
+            if target.path == "/private":
+                return 403, [], b""
+            return _ok(target, method, read_body, body, headers)
+
+        blocked = fetch("https://example.com/private", resolve=_public_resolve, pacer=pacer, transport=transport)
+        after = fetch("https://example.com/a", resolve=_public_resolve, pacer=pacer, transport=transport)
+        self.assertEqual(blocked.error, BLOCK_MESSAGE)
+        self.assertEqual(after.status, 200)
+        self.assertFalse(pacer.any_closed())
+
+    def test_three_forbidden_in_a_row_stop_the_host_then_reopen(self):
+        clock = FakeClock()
+        pacer = HostPacer(gap=0, inflight=2, clock=clock.monotonic, sleep=clock.sleep, cooldown=60)
+        calls = []
+        answer = [403]
+
+        def transport(target, method, read_body, body=b"", headers=None):
+            calls.append(target.url)
+            return answer[0], [], b"<p></p>"
+
+        for name in ("a", "b", "c"):
+            fetch(f"https://example.com/{name}", resolve=_public_resolve, pacer=pacer, transport=transport)
+        self.assertTrue(pacer.any_closed())
+        sent = len(calls)
+        held = fetch("https://example.com/d", resolve=_public_resolve, pacer=pacer, transport=transport)
+        self.assertEqual(held.error, BLOCK_MESSAGE)
+        self.assertEqual(len(calls), sent)
+
+        clock.now += 60
+        answer[0] = 200
+        again = fetch("https://example.com/d", resolve=_public_resolve, pacer=pacer, transport=transport)
+        self.assertEqual(again.status, 200)
+        self.assertEqual(again.error, "")
+        self.assertFalse(pacer.any_closed())
+
+    def test_timeout_is_sent_once_more(self):
+        clock = FakeClock()
+        pacer = HostPacer(gap=0, inflight=2, clock=clock.monotonic, sleep=clock.sleep)
+        calls = []
+
+        def transport(target, method, read_body, body=b"", headers=None):
+            calls.append(target.url)
+            if len(calls) == 1:
+                raise TimeoutError()
+            return _ok(target, method, read_body, body, headers)
+
+        result = fetch("https://example.com/a", resolve=_public_resolve, pacer=pacer, transport=transport)
+        self.assertEqual(result.status, 200)
+        self.assertEqual(len(calls), 2)
+
+        def always(target, method, read_body, body=b"", headers=None):
+            calls.append(target.url)
+            raise TimeoutError()
+
+        slow = fetch("https://example.com/b", resolve=_public_resolve, pacer=pacer, transport=always)
+        self.assertEqual(slow.error, "시간 초과")
+        self.assertEqual(len(calls), 4)
+
+    def test_icon_character_is_sent_as_ascii(self):
+        target = Target(
+            url="https://example.com/icon\uf06e",
+            scheme="https",
+            hostname="example.com",
+            port=443,
+            path="/icon\uf06e",
+            ip="93.184.216.34",
+        )
+        payload = _request_bytes(target, "GET")
+        head = payload.split(b"\r\n\r\n", 1)[0]
+        self.assertTrue(head.isascii())
+        self.assertIn(b"GET /icon%EF%81%AE HTTP/1.1\r\n", payload)
+        plain = Target(
+            url="https://example.com/a%20b?q=1",
+            scheme="https",
+            hostname="example.com",
+            port=443,
+            path="/a%20b?q=1",
+            ip="93.184.216.34",
+        )
+        self.assertIn(b"GET /a%20b?q=1 HTTP/1.1\r\n", _request_bytes(plain, "GET"))
+
+    def test_encode_error_releases_the_host_slot(self):
+        clock = FakeClock()
+        pacer = HostPacer(gap=0, inflight=2, clock=clock.monotonic, sleep=clock.sleep)
+        calls = []
+
+        def transport(target, method, read_body, body=b"", headers=None):
+            calls.append(target.path)
+            if "\uf06e" in target.path:
+                raise UnicodeEncodeError("ascii", target.path, 0, 1, "ordinal not in range(128)")
+            return _ok(target, method, read_body, body, headers)
+
+        bad = fetch("https://example.com/icon\uf06e", resolve=_public_resolve, pacer=pacer, transport=transport)
+        self.assertEqual(bad.error, "이 주소는 요청할 수 없습니다.")
+        good = fetch("https://example.com/next", resolve=_public_resolve, pacer=pacer, transport=transport)
+        self.assertEqual(good.status, 200)
+        self.assertEqual(good.error, "")
+        self.assertEqual(calls, ["/icon\uf06e", "/next"])
+        with pacer._lock:
+            self.assertEqual(pacer._hosts["example.com"]["open"], 0)
+
+    def test_one_odd_asset_does_not_stop_the_page(self):
+        icon = "/icon\uf06e".encode()
+        html = b'<html lang="en"><body><a href="' + icon + b'">i</a><a href="/ok">o</a></body></html>'
+
+        def fake(url, read_body=True, **_kwargs):
+            if "\uf06e" in url:
+                raise UnicodeEncodeError("ascii", url, 61, 62, "ordinal not in range(128)")
+            return HttpResult(url=url, status=200, content_type="text/html", body=html if read_body else b"")
+
+        checked = check_page_assets(
+            "https://example.com/",
+            rules={"path_contains": {}},
+            fetch_one=fake,
+            resolve=_public_resolve,
+        )
+        self.assertTrue(checked["ok"])
+
+    def test_blocked_link_does_not_fail_the_page(self):
+        html = b'<html lang="en"><body><a href="https://social.example/share">s</a><a href="/gone">g</a></body></html>'
+
+        def fake(url, read_body=True, **_kwargs):
+            if "social.example" in url:
+                return HttpResult(url=url, status=403, content_type="", body=b"", error=BLOCK_MESSAGE)
+            if url.endswith("/gone"):
+                return HttpResult(url=url, status=404, content_type="text/html", body=b"")
+            return HttpResult(url=url, status=200, content_type="text/html", body=html)
+
+        checked = check_page_assets("https://example.com/", rules={"path_contains": {}}, fetch_one=fake, resolve=_public_resolve)
+        self.assertTrue(checked["ok"])
+        broken = [row["url"] for view in checked["viewports"] for row in view["brokenLinks"]]
+        self.assertIn("https://example.com/gone", broken)
+        self.assertNotIn("https://social.example/share", broken)
 
     def test_at_most_two_connections(self):
         entered = threading.Semaphore(0)

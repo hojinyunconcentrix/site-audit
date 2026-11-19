@@ -1172,3 +1172,751 @@ def decode_html(body: bytes, content_type: str) -> str:
     if "euc-kr" in lowered or "cp949" in lowered:
         return body.decode("cp949", errors="replace")
     return body.decode("utf-8", errors="replace")
+
+
+class _SpecEl:
+    def __init__(self, tag: str, classes: set[str], attrs: dict | None = None) -> None:
+        self.tag = tag
+        self.classes = classes
+        self.attrs = attrs or {}
+        self.kids: list = []
+
+
+class _SpecTree(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.root = _SpecEl("", set())
+        self.stack = [self.root]
+        self.skip = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag = tag.lower()
+        if self.skip:
+            if tag not in _VOID_TAGS:
+                self.skip += 1
+            return
+        if tag in {"script", "style"}:
+            self.skip = 1
+            return
+        data = {name.lower(): value or "" for name, value in attrs if name}
+        classes = set(data.get("class", "").lower().split())
+        node = _SpecEl(tag, classes, data)
+        self.stack[-1].kids.append(node)
+        if tag not in _VOID_TAGS:
+            self.stack.append(node)
+
+    def handle_startendtag(self, tag: str, attrs) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag.lower() not in _VOID_TAGS and tag.lower() not in {"script", "style"}:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if self.skip:
+            self.skip -= 1
+            return
+        for index in range(len(self.stack) - 1, 0, -1):
+            if self.stack[index].tag == tag:
+                del self.stack[index:]
+                return
+
+    def handle_data(self, data: str) -> None:
+        if self.skip or not data:
+            return
+        self.stack[-1].kids.append(data)
+
+
+def _spec_tree(html: str) -> _SpecEl:
+    parser = _SpecTree()
+    try:
+        parser.feed(html or "")
+        parser.close()
+    except Exception:
+        return parser.root
+    return parser.root
+
+
+def _spec_plain(node) -> str:
+    parts: list[str] = []
+
+    def walk(item) -> None:
+        if isinstance(item, str):
+            parts.append(item)
+            return
+        for kid in item.kids:
+            walk(kid)
+
+    walk(node)
+    return " ".join("".join(parts).split())
+
+
+def _clean_spec_name(value: str) -> str:
+    return " ".join((value or "").split()).rstrip(":").strip()
+
+
+def _clean_spec_value(value: str) -> str:
+    return " ".join((value or "").split())
+
+
+def _norm_spec(value: str) -> str:
+    return " ".join((value or "").casefold().split())
+
+
+def _grade_letter(value: str) -> str:
+    """Energy Grade의 문자, 또는 ERP 값 YES (D) 안의 문자."""
+    text = _clean_spec_value(value)
+    alone = re.fullmatch(r"[A-G]\+{0,3}", text, re.I)
+    if alone:
+        return alone.group(0).upper()
+    wrapped = re.fullmatch(r"yes\s*\(\s*([A-G]\+{0,3})\s*\)", text, re.I)
+    if wrapped:
+        return wrapped.group(1).upper()
+    return ""
+
+
+def _same_spec_value(left: str, right: str) -> bool:
+    if _norm_spec(left) == _norm_spec(right):
+        return True
+    source = _grade_letter(left)
+    compare = _grade_letter(right)
+    return bool(source and compare and source == compare)
+
+
+_ENERGY_LABEL = re.compile(r"^energy grade\s*:\s*([A-G]\+{0,3})$", re.I)
+
+
+def _energy_grade_letter(root: _SpecEl) -> str:
+    found: list[str] = []
+
+    def visit(node: _SpecEl) -> None:
+        if node.tag == "span" and "sr-only" in node.classes:
+            match = _ENERGY_LABEL.match(_spec_plain(node))
+            if match:
+                found.append(match.group(1).upper())
+        for kid in node.kids:
+            if isinstance(kid, _SpecEl):
+                visit(kid)
+
+    visit(root)
+    return found[0] if found else ""
+
+
+def _standard_erp_grade(rows: list[dict] | None) -> str:
+    """STANDARD 영역 ERP 값의 괄호 안 등급."""
+    for row in rows or []:
+        if _fold_label(row.get("group") or "") != "standard":
+            continue
+        if _fold_label(row.get("name") or "") != "erp":
+            continue
+        match = re.search(r"\(\s*([A-G]\+{0,3})\s*\)", row.get("value") or "", re.I)
+        return match.group(1).upper() if match else ""
+    return ""
+
+
+def _image_alt(node: _SpecEl) -> str:
+    if node.tag == "img":
+        return (node.attrs.get("alt") or "").strip()
+    for kid in node.kids:
+        if isinstance(kid, _SpecEl):
+            alt = _image_alt(kid)
+            if alt:
+                return alt
+    return ""
+
+
+def _file_list_energy_alt(root: _SpecEl) -> str | None:
+    """file-list 영역이 있으면 이미지 alt. 영역이 없으면 None."""
+    found: list[str] = []
+
+    def visit(node: _SpecEl) -> None:
+        if found:
+            return
+        download = (node.attrs.get("data-file-download") or "").lower() == "true"
+        if node.tag == "div" and "file-list" in node.classes and download:
+            found.append(_grade_letter(_image_alt(node)) or _clean_spec_value(_image_alt(node)))
+            return
+        for kid in node.kids:
+            if isinstance(kid, _SpecEl):
+                visit(kid)
+
+    visit(root)
+    if not found:
+        return None
+    return found[0]
+
+
+def energy_sheet_from_rows(source_html: str, rival_rows: list[dict] | None, compare_html: str = "") -> dict:
+    """현 사이트 Energy Grade와 비교 사이트의 에너지 등급."""
+    source = _energy_grade_letter(_spec_tree(source_html or ""))
+    alt = _file_list_energy_alt(_spec_tree(compare_html)) if compare_html else None
+    compare = _standard_erp_grade(rival_rows) if alt is None else alt
+    return {
+        "source": source,
+        "compare": compare,
+        "same": bool(source and compare and source == compare),
+    }
+
+
+def _spec_title(value: str) -> str:
+    """비교용 제목. 괄호와 그 안은 뺀다."""
+    name = _clean_spec_name(value)
+    title = re.sub(r"\s*[(（][^)）]*[)）]", "", name)
+    title = " ".join(title.split()).strip()
+    return title or name
+
+
+def _fold_label(value: str) -> str:
+    text = _norm_spec(value).replace("~", " ")
+    text = re.sub(r"[()（）,./%]", " ", text)
+    return " ".join(text.split())
+
+
+def _paren_parts(name: str) -> tuple[str, str] | None:
+    match = re.fullmatch(r"(.+?)\s*\(([^()]*)\)\s*", name.strip())
+    if not match:
+        return None
+    head, inner = match.group(1).strip(), match.group(2).strip()
+    if not head or not inner:
+        return None
+    return head, inner
+
+
+def _slash_names(name: str) -> list[str]:
+    """`SuperSign Control / Control+`처럼 마지막 단어의 다른 표기이면 두 이름을 돌려준다."""
+    parts = [part.strip() for part in re.split(r"\s*/\s*", name) if part.strip()]
+    if len(parts) != 2:
+        return [name]
+    left, right = parts
+    words = left.split()
+    if len(words) < 2:
+        return [name]
+    base = _norm_spec(words[-1]).rstrip("+")
+    other = _norm_spec(right).rstrip("+")
+    if not base or base != other:
+        return [name]
+    return [left, " ".join(words[:-1] + [right])]
+
+
+def _match_keys(name: str, group: str) -> list[str]:
+    """구체적인 키를 앞에 둔다. `제목 (세부)`는 그 제목 묶음의 세부 항목과 만난다."""
+    keys: list[str] = []
+
+    def add(key: str) -> None:
+        key = " ".join(key.split())
+        if key and key not in keys:
+            keys.append(key)
+
+    folded = _fold_label(name)
+    outer = _paren_parts(name)
+    if group:
+        add(f"{_fold_label(group)}/{folded}")
+    if outer:
+        head, inner = outer
+        add(f"{_fold_label(head)}/{_fold_label(inner)}")
+        if group:
+            add(f"{_fold_label(group)}/{_fold_label(inner)}")
+            add(f"{_fold_label(group)}/{_fold_label(head)}")
+        add(_fold_label(head))
+    else:
+        add(folded)
+    return keys
+
+
+_ALL_SPEC_LABELS = {
+    "all spec",
+    "all specs",
+    "all specification",
+    "all specifications",
+    "전체 스펙",
+    "전체 사양",
+    "모든 스펙",
+    "모든 사양",
+}
+
+
+def _is_all_spec_text(value: str) -> bool:
+    compact = _norm_spec(value)
+    if not compact or len(compact) > 32:
+        return False
+    if compact in _ALL_SPEC_LABELS:
+        return True
+    return compact.startswith("all spec")
+
+
+def _class_has(classes: set[str], bits: tuple[str, ...], tails: tuple[str, ...]) -> bool:
+    for token in classes:
+        if any(bit in token for bit in bits):
+            return True
+        if token.endswith(tails):
+            return True
+    return False
+
+
+def _is_spec_name(node: _SpecEl) -> bool:
+    return _class_has(
+        node.classes,
+        ("spec-name", "spec-label", "spec-key"),
+        ("__name", "__label", "-name", "-label"),
+    )
+
+
+def _is_spec_value(node: _SpecEl) -> bool:
+    return _class_has(
+        node.classes,
+        ("spec-desc", "spec-value", "spec-text", "spec-data"),
+        ("__desc", "__value", "__text", "__data", "-desc", "-value", "-text"),
+    )
+
+
+def _has_spec_structure(node: _SpecEl) -> bool:
+    if node.tag in {"dl", "table", "tr"} or _is_spec_name(node):
+        return True
+    for kid in node.kids:
+        if isinstance(kid, _SpecEl) and _has_spec_structure(kid):
+            return True
+    return False
+
+
+def _heading_text(node: _SpecEl) -> str:
+    if _has_spec_structure(node):
+        return ""
+    if node.tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+        return _clean_spec_name(_spec_plain(node))
+    named = node.classes & {"title", "category", "group"} or any(
+        token.endswith("-title") or token.endswith("__category") or "spec-group" in token or "category" in token
+        for token in node.classes
+    )
+    if not named:
+        return ""
+    return _clean_spec_name(_spec_plain(node))
+
+
+def _elements(node: _SpecEl) -> list[_SpecEl]:
+    return [kid for kid in node.kids if isinstance(kid, _SpecEl)]
+
+
+def _from_dts(kids: list, group: str) -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
+    name = ""
+    values: list[str] = []
+
+    def flush() -> None:
+        nonlocal name, values
+        if name:
+            rows.append((group, name, " ".join(values)))
+        name = ""
+        values = []
+
+    for kid in kids:
+        if not isinstance(kid, _SpecEl):
+            continue
+        if kid.tag == "dt":
+            flush()
+            name = _spec_plain(kid)
+            values = []
+        elif kid.tag == "dd" and name:
+            values.append(_spec_plain(kid))
+        else:
+            flush()
+            rows.extend(_spec_pairs(kid, group))
+    flush()
+    return rows
+
+
+def _from_rows(elements: list[_SpecEl], group: str) -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
+    current = group
+    for element in elements:
+        if element.tag != "tr":
+            heading = _heading_text(element)
+            if heading:
+                current = heading
+            else:
+                rows.extend(_spec_pairs(element, current))
+            continue
+        cells = [kid for kid in element.kids if isinstance(kid, _SpecEl) and kid.tag in {"td", "th"}]
+        if len(cells) >= 2:
+            rows.append((current, _spec_plain(cells[0]), " ".join(_spec_plain(cell) for cell in cells[1:])))
+            continue
+        if len(cells) == 1:
+            nested = _spec_pairs(cells[0], current)
+            if nested:
+                rows.extend(nested)
+            else:
+                label = _clean_spec_name(_spec_plain(cells[0]))
+                if label:
+                    current = label
+    return rows
+
+
+def _from_mixed(elements: list[_SpecEl], group: str) -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
+    current = group
+    index = 0
+    while index < len(elements):
+        element = elements[index]
+        if _is_spec_name(element) and index + 1 < len(elements) and _is_spec_value(elements[index + 1]):
+            rows.append((current, _spec_plain(element), _spec_plain(elements[index + 1])))
+            index += 2
+            continue
+        heading = _heading_text(element)
+        if heading:
+            current = heading
+            index += 1
+            continue
+        rows.extend(_spec_pairs(element, current))
+        index += 1
+    return rows
+
+
+def _section_heading(node: _SpecEl) -> str:
+    """제목만 있는 칸. h4가 감싸져 있어도 다음 스펙 목록의 묶음 이름이 된다."""
+    if _has_spec_structure(node):
+        return ""
+    direct = _heading_text(node)
+    if direct:
+        return direct
+    found: list[str] = []
+
+    def walk(el: _SpecEl) -> None:
+        for kid in el.kids:
+            if not isinstance(kid, _SpecEl) or _has_spec_structure(kid):
+                continue
+            text = _heading_text(kid)
+            if text:
+                found.append(text)
+            else:
+                walk(kid)
+
+    walk(node)
+    if len(found) != 1:
+        return ""
+    if _norm_spec(_spec_plain(node)) != _norm_spec(found[0]):
+        return ""
+    return found[0]
+
+
+def _pair_container(node: _SpecEl) -> bool:
+    if node.tag == "li":
+        return True
+    blob = " ".join(node.classes)
+    return "spec" in blob or "__item" in blob
+
+
+def _spec_pairs(node: _SpecEl, group: str = "") -> list[tuple[str, str, str]]:
+    elements = _elements(node)
+    if any(element.tag == "dt" for element in elements):
+        return _from_dts(node.kids, group)
+    if any(element.tag == "tr" for element in elements):
+        return _from_rows(elements, group)
+    if any(element.tag in {"table", "tbody", "thead", "dl"} or _is_spec_name(element) for element in elements):
+        return _from_mixed(elements, group)
+    if (
+        _pair_container(node)
+        and len(elements) == 2
+        and not any(_has_spec_structure(element) for element in elements)
+    ):
+        return [(group, _spec_plain(elements[0]), _spec_plain(elements[1]))]
+    rows: list[tuple[str, str, str]] = []
+    current = group
+    for element in elements:
+        heading = _section_heading(element)
+        if heading:
+            current = heading
+            continue
+        rows.extend(_spec_pairs(element, current))
+    return rows
+
+
+def _label_before(chain: list[_SpecEl]) -> str:
+    for depth in range(len(chain) - 2, -1, -1):
+        parent = chain[depth]
+        child = chain[depth + 1]
+        prior: list = []
+        for kid in parent.kids:
+            if kid is child:
+                break
+            prior.append(kid)
+        for kid in reversed(prior):
+            if isinstance(kid, str):
+                if kid.strip():
+                    return kid
+                continue
+            if "c-compare-selling__spec" in kid.classes:
+                continue
+            text = _spec_plain(kid)
+            if text:
+                return text
+    return ""
+
+
+def _opens_with_all_spec(node: _SpecEl) -> bool:
+    for kid in node.kids:
+        if isinstance(kid, str):
+            if _is_all_spec_text(kid):
+                return True
+            continue
+        if kid.tag in {"button", "a", "h1", "h2", "h3", "h4", "summary"} and _is_all_spec_text(_spec_plain(kid)):
+            return True
+    return False
+
+
+def _collect_regions(root: _SpecEl, pred) -> list[_SpecEl]:
+    found: list[_SpecEl] = []
+
+    def visit(node: _SpecEl, inside: bool) -> None:
+        hit = pred(node) and not inside
+        if hit:
+            found.append(node)
+        for kid in node.kids:
+            if isinstance(kid, _SpecEl):
+                visit(kid, inside or bool(pred(node)))
+
+    visit(root, False)
+    return found
+
+
+def _selling_regions(root: _SpecEl) -> list[_SpecEl]:
+    nodes: list[tuple[_SpecEl, list[_SpecEl]]] = []
+
+    def visit(node: _SpecEl, ancestors: list[_SpecEl], inside: bool) -> None:
+        hit = "c-compare-selling__spec" in node.classes and not inside
+        if hit:
+            nodes.append((node, ancestors + [node]))
+        marked = inside or "c-compare-selling__spec" in node.classes
+        for kid in node.kids:
+            if isinstance(kid, _SpecEl):
+                visit(kid, ancestors + [node], marked)
+
+    visit(root, [], False)
+    labeled = [
+        node for node, chain in nodes
+        if _is_all_spec_text(_label_before(chain)) or _opens_with_all_spec(node)
+    ]
+    if labeled:
+        return labeled
+    return [node for node, _chain in nodes]
+
+
+_RIVAL_AREA = {"tech-spacs-area", "tech-specs-area", "tech-spec-area"}
+
+
+def _rival_region(node: _SpecEl) -> bool:
+    return bool(node.classes & _RIVAL_AREA) and {"collapse", "show"} <= node.classes
+
+
+def _spec_dicts(regions: list[_SpecEl]) -> list[dict]:
+    rows: list[dict] = []
+    for region in regions:
+        for group, name, value in _spec_pairs(region):
+            label = _clean_spec_name(name)
+            if not label or _is_all_spec_text(label):
+                continue
+            section = _clean_spec_name(group)
+            if _norm_spec(section) == _norm_spec(label):
+                section = ""
+            rows.append({
+                "group": section,
+                "name": label,
+                "value": _clean_spec_value(value),
+            })
+    return rows
+
+
+def selling_spec_rows(html: str) -> list[dict] | None:
+    """All Spec의 c-compare-selling__spec 항목. 영역이 없으면 None."""
+    root = _spec_tree(html)
+    regions = _selling_regions(root)
+    if not regions:
+        return None
+    return _spec_dicts(regions)
+
+
+def spec_sections(rows: list[dict] | None) -> list[dict]:
+    """h4 제목별로 묶은 All Spec 항목."""
+    sections: list[dict] = []
+    found: dict[str, dict] = {}
+    for row in rows or []:
+        title = _clean_spec_name(row.get("group") or "")
+        section = found.get(title)
+        if section is None:
+            section = {"title": title, "rows": []}
+            found[title] = section
+            sections.append(section)
+        section["rows"].append({
+            "name": row.get("name") or "",
+            "value": row.get("value") or "",
+        })
+    return sections
+
+
+def rival_spec_rows(html: str) -> list[dict] | None:
+    """펼쳐진 tech-spacs-area 항목. 없으면 All Spec의 c-compare-selling__spec을 읽는다."""
+    root = _spec_tree(html)
+    regions = _collect_regions(root, _rival_region)
+    if not regions:
+        regions = _selling_regions(root)
+    if not regions:
+        return None
+    return _spec_dicts(regions)
+
+
+def _spec_items(rows: list[dict]) -> list[dict]:
+    items: list[dict] = []
+    family = 0
+    for row in rows:
+        name = _clean_spec_name(row.get("name") or "")
+        if not name or _is_all_spec_text(name):
+            family += 1
+            continue
+        group = _clean_spec_name(row.get("group") or "")
+        value = _clean_spec_value(row.get("value") or "")
+        aliases = _slash_names(name)
+        optional = len(aliases) > 1
+        for alias in aliases:
+            items.append({
+                "name": alias,
+                "origin": name,
+                "value": value,
+                "group": group,
+                "keys": _match_keys(alias, group),
+                "optional": optional,
+                "family": family,
+            })
+        family += 1
+    return items
+
+
+def _diff_label(one: dict | None, other: dict | None, general: bool) -> str:
+    chosen = one or other
+    if chosen is None:
+        return ""
+    if general:
+        return _spec_title(chosen["name"])
+    for item in (one, other):
+        if item and "(" in item["origin"]:
+            return item["origin"]
+    return chosen["name"]
+
+
+def spec_check_rows(source: list[dict], rival: list[dict]) -> list[dict]:
+    """h4 묶음마다 맞춘 항목. 값이 같으면 same이다."""
+    left = _spec_items(source)
+    right = _spec_items(rival)
+    index: dict[str, list[int]] = {}
+    for position, item in enumerate(right):
+        for key in item["keys"]:
+            index.setdefault(key, []).append(position)
+    used: set[int] = set()
+    matched_left: set[int] = set()
+    pairs: list[tuple[int, int, bool]] = []
+    for position, item in enumerate(left):
+        found = None
+        general = False
+        for key in item["keys"]:
+            for candidate in index.get(key, []):
+                if candidate in used:
+                    continue
+                other = right[candidate]
+                left_group = _fold_label(item["group"])
+                right_group = _fold_label(other["group"])
+                if left_group and right_group and left_group != right_group:
+                    continue
+                found = candidate
+                general = "/" not in key
+                break
+            if found is not None:
+                break
+        if found is None:
+            continue
+        used.add(found)
+        matched_left.add(position)
+        pairs.append((position, found, general))
+
+    checks: list[dict] = []
+
+    def covered(items: list[dict], position: int, matched: set[int]) -> bool:
+        item = items[position]
+        if not item["optional"]:
+            return False
+        return any(
+            other in matched and items[other]["family"] == item["family"]
+            for other in range(len(items))
+        )
+
+    def seen_family(items: list[dict], position: int, done: set[int]) -> bool:
+        family = items[position]["family"]
+        if family in done:
+            return True
+        done.add(family)
+        return False
+
+    def add(one: dict | None, other: dict | None, general: bool) -> None:
+        source_value = one["value"] if one else ""
+        compare_value = other["value"] if other else ""
+        group = ""
+        for item in (one, other):
+            if item and item.get("group"):
+                group = item["group"]
+                break
+        name = one["name"] if one and one.get("group") else other["name"] if other and other.get("group") else _diff_label(one, other, general)
+        checks.append({
+            "group": group,
+            "name": name,
+            "diffName": _diff_label(one, other, general),
+            "source": source_value,
+            "compare": compare_value,
+            "same": _same_spec_value(source_value, compare_value),
+        })
+
+    for left_index, right_index, general in pairs:
+        add(left[left_index], right[right_index], general)
+    def alone(item: dict) -> dict:
+        if not item["optional"]:
+            return item
+        return {**item, "name": item["origin"], "origin": item["origin"]}
+
+    left_done: set[int] = set()
+    for position, item in enumerate(left):
+        if position in matched_left or covered(left, position, matched_left):
+            continue
+        if item["optional"] and seen_family(left, position, left_done):
+            continue
+        add(alone(item), None, False)
+    right_done: set[int] = set()
+    for position, item in enumerate(right):
+        if position in used or covered(right, position, used):
+            continue
+        if item["optional"] and seen_family(right, position, right_done):
+            continue
+        add(None, alone(item), False)
+    return checks
+
+
+def diff_spec_rows(source: list[dict], rival: list[dict]) -> list[dict]:
+    """값이 다르거나 한쪽에만 있는 항목."""
+    return [
+        {"name": row["diffName"], "source": row["source"], "compare": row["compare"]}
+        for row in spec_check_rows(source, rival)
+        if not row["same"]
+    ]
+
+
+def spec_check_sections(source: list[dict], rival: list[dict]) -> list[dict]:
+    """c-compare-selling__spec의 h4를 제목으로 한 체크 목록."""
+    sections: list[dict] = []
+    found: dict[str, dict] = {}
+    for row in spec_check_rows(source, rival):
+        title = row["group"]
+        section = found.get(title)
+        if section is None:
+            section = {"title": title, "rows": []}
+            found[title] = section
+            sections.append(section)
+        section["rows"].append({
+            "name": row["name"],
+            "source": row["source"],
+            "compare": row["compare"],
+            "same": row["same"],
+        })
+    return sections

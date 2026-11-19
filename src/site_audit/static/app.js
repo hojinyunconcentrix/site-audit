@@ -308,8 +308,15 @@ function writeOneChecks(items) {
   }
 }
 
-function oneCheckKey(url, kind) {
-  return `${normalizeUrl(url)}|${kind || "일반"}`;
+function compareUrlOf(payload) {
+  if (!payload) return "";
+  if (payload.compareUrl) return String(payload.compareUrl);
+  const spec = payload.specCompare;
+  return spec && spec.url ? String(spec.url) : "";
+}
+
+function oneCheckKey(url, kind, compareUrl) {
+  return `${normalizeUrl(url)}|${kind || "일반"}|${normalizeUrl(compareUrl || "")}`;
 }
 
 function paintOneSaved() {
@@ -337,7 +344,12 @@ function paintOneSaved() {
     const host = document.createElement("span");
     host.textContent = payload.url || "주소 없음";
     const meta = document.createElement("span");
-    meta.textContent = [payload.kind || "일반", item.when]
+    const compareUrl = compareUrlOf(payload);
+    meta.textContent = [
+      payload.kind || "일반",
+      compareUrl ? `비교 ${compareUrl}` : "",
+      item.when,
+    ]
       .filter(Boolean)
       .join(" · ");
     button.append(host, meta);
@@ -357,12 +369,16 @@ function paintOneSaved() {
 
 function saveOneCheck(payload) {
   if (!payload || !payload.url) return;
-  const key = oneCheckKey(payload.url, payload.kind);
+  const stored = JSON.parse(JSON.stringify(payload));
+  const compareUrl = compareUrlOf(stored);
+  if (stored.kind === "PDP" && compareUrl) stored.compareUrl = compareUrl;
+  const key = oneCheckKey(stored.url, stored.kind, compareUrlOf(stored));
   const previous = loadOneChecks().find(
     (item) =>
       oneCheckKey(
         item.payload && item.payload.url,
         item.payload && item.payload.kind,
+        compareUrlOf(item.payload),
       ) === key,
   );
   const record = {
@@ -370,7 +386,7 @@ function saveOneCheck(payload) {
       (previous && previous.id) ||
       `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
     when: new Date().toLocaleString("ko-KR", { hour12: false }),
-    payload,
+    payload: stored,
   };
   writeOneChecks([
     record,
@@ -380,6 +396,7 @@ function saveOneCheck(payload) {
         oneCheckKey(
           item.payload && item.payload.url,
           item.payload && item.payload.kind,
+          compareUrlOf(item.payload),
         ) !== key,
     ),
   ]);
@@ -395,6 +412,8 @@ function openSavedOne(item) {
   );
   if (radio) radio.checked = true;
   syncCompareField();
+  const compareInput = document.querySelector("#compare-url");
+  if (compareInput) compareInput.value = compareUrlOf(payload);
   renderPageCheck(payload);
 }
 
@@ -2905,6 +2924,12 @@ function selectedKind() {
   return picked ? picked.value : "일반";
 }
 
+function comparePageUrl() {
+  const input = document.querySelector("#compare-url");
+  if (!input || selectedKind() !== "PDP") return "";
+  return pageCheckUrl(input.value);
+}
+
 function syncCompareField() {
   const field = document.querySelector("#compare-url-field");
   if (field) field.hidden = selectedKind() !== "PDP";
@@ -3038,6 +3063,168 @@ function renderPageCheck(payload) {
   table.append(head, body);
   wrap.append(table);
   result.append(wrap);
+  paintEnergySheet(result, payload);
+  paintAllSpec(result, payload);
+}
+
+function paintEnergySheet(result, payload) {
+  const sheet = payload && payload.energySheet;
+  if (!sheet || (!sheet.source && !sheet.compare)) return;
+  const block = document.createElement("section");
+  block.className = "all-spec energy-sheet";
+  const heading = document.createElement("h3");
+  heading.textContent = "Energy Sheet";
+  block.append(heading);
+  const table = document.createElement("table");
+  table.className = "all-spec-table is-compare";
+  const head = document.createElement("thead");
+  const titles = document.createElement("tr");
+  for (const text of ["항목", "검수 페이지", "비교 페이지"]) {
+    const title = document.createElement("th");
+    title.scope = "col";
+    title.textContent = text;
+    titles.append(title);
+  }
+  head.append(titles);
+  const body = document.createElement("tbody");
+  const line = document.createElement("tr");
+  const name = document.createElement("th");
+  name.scope = "row";
+  name.textContent = "Energy Grade";
+  const source = document.createElement("td");
+  source.dataset.label = "검수 페이지";
+  source.textContent = sheet.source || "없음";
+  const other = document.createElement("td");
+  other.dataset.label = "비교 페이지";
+  other.textContent = sheet.compare || "없음";
+  if (!sheet.same) {
+    if (!sheet.source) source.className = "is-empty";
+    other.className = sheet.compare ? "is-diff" : "is-empty";
+  }
+  line.append(name, source, other);
+  body.append(line);
+  table.append(head, body);
+  block.append(table);
+  result.append(block);
+}
+
+function paintAllSpec(result, payload) {
+  const spec = payload && payload.allSpec;
+  const compare = payload && payload.specCompare;
+  if (!spec && !compare) return;
+  const block = document.createElement("section");
+  block.className = "all-spec";
+  const heading = document.createElement("h3");
+  heading.textContent = "All Spec";
+  block.append(heading);
+  if (compare && compare.url) {
+    const note = document.createElement("p");
+    note.className = "spec-note";
+    note.append(document.createTextNode("비교 주소 "));
+    const link = document.createElement("a");
+    link.href = compare.url;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.textContent = compare.url;
+    note.append(link);
+    block.append(note);
+  }
+  const compared = Boolean(
+    compare && compare.ok && compare.sourceFound && compare.compareFound,
+  );
+  let message = "";
+  if (compare && !compare.ok) message = compare.message || "비교 주소를 읽지 못했습니다.";
+  else if (compare && !compare.sourceFound && !compare.compareFound)
+    message = "All Spec 영역과 비교 사이트의 스펙 영역을 찾지 못했습니다.";
+  else if (compare && !compare.sourceFound) message = "All Spec 영역을 찾지 못했습니다.";
+  else if (compare && !compare.compareFound)
+    message = "비교 사이트의 스펙 영역을 찾지 못했습니다.";
+  if (message) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = message;
+    block.append(empty);
+  }
+  const sections = compared
+    ? compare.sections || []
+    : (spec && spec.sections) || [];
+  if (!sections.length && !(spec && spec.found) && !message) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "All Spec 영역을 찾지 못했습니다.";
+    block.append(empty);
+  }
+  for (const section of sections) {
+    const group = document.createElement("section");
+    group.className = "all-spec-group";
+    if (section.title) {
+      const title = document.createElement("h4");
+      title.textContent = section.title;
+      group.append(title);
+    }
+    if (compared) paintComparedSpec(group, section.rows || []);
+    else paintSpecSheet(group, section.rows || []);
+    block.append(group);
+  }
+  result.append(block);
+}
+
+function paintSpecSheet(group, rows) {
+  const table = document.createElement("table");
+  table.className = "all-spec-table";
+  const body = document.createElement("tbody");
+  for (let index = 0; index < rows.length; index += 2) {
+    const line = document.createElement("tr");
+    appendSpecPair(line, rows[index]);
+    appendSpecPair(line, rows[index + 1]);
+    body.append(line);
+  }
+  table.append(body);
+  group.append(table);
+}
+
+function appendSpecPair(line, row) {
+  const name = document.createElement("th");
+  name.scope = "row";
+  name.textContent = row ? row.name || "" : "";
+  const value = document.createElement("td");
+  value.textContent = row ? row.value || "" : "";
+  line.append(name, value);
+}
+
+function paintComparedSpec(group, rows) {
+  const table = document.createElement("table");
+  table.className = "all-spec-table is-compare";
+  const head = document.createElement("thead");
+  const titles = document.createElement("tr");
+  for (const text of ["항목", "검수 페이지", "비교 페이지"]) {
+    const title = document.createElement("th");
+    title.scope = "col";
+    title.textContent = text;
+    titles.append(title);
+  }
+  head.append(titles);
+  const body = document.createElement("tbody");
+  for (const row of rows) {
+    const line = document.createElement("tr");
+    const name = document.createElement("th");
+    name.scope = "row";
+    name.textContent = row.name || "";
+    const source = document.createElement("td");
+    source.dataset.label = "검수 페이지";
+    source.textContent = row.source ? String(row.source) : "없음";
+    const other = document.createElement("td");
+    other.dataset.label = "비교 페이지";
+    other.textContent = row.compare ? String(row.compare) : "없음";
+    if (!row.same) {
+      source.className = row.source ? "" : "is-empty";
+      other.className = "is-diff";
+    }
+    line.append(name, source, other);
+    body.append(line);
+  }
+  table.append(head, body);
+  group.append(table);
 }
 
 async function runPageCheck(url) {
@@ -3059,10 +3246,13 @@ async function runPageCheck(url) {
   setBusy(true);
   paintOneCheck();
   try {
+    const body = { url, kind };
+    const compareUrl = comparePageUrl();
+    if (compareUrl) body.compareUrl = compareUrl;
     const response = await fetch("/api/page-check", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, kind }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
     const payload = await response.json().catch(() => ({}));
