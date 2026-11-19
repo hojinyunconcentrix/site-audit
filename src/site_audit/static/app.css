@@ -603,13 +603,13 @@ button.kpi-recheck {
 #summary.filters .kpi-wrap button.kpi {
   min-height: 0;
   padding: 12px 14px;
+  height: 100px;
 }
 
 #summary.filters > button.kpi {
   align-self: stretch;
   align-items: flex-start;
   box-sizing: border-box;
-  height: 100%;
 }
 
 .card {
@@ -734,7 +734,7 @@ button.kpi-recheck {
 
 .one-split {
   display: grid;
-  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  grid-template-columns: minmax(560px, 320px) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
@@ -763,6 +763,26 @@ button.kpi-recheck {
 
 #one-saved-card button.link span:last-child {
   white-space: normal;
+}
+
+#one-saved-card .saved-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--contents-000);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+#one-saved-card .saved-title > .badge {
+  flex: none;
+  margin-top: 1px;
+}
+
+#one-saved-card .saved-title > span:last-child {
+  color: var(--contents-000);
+  font-size: 14px;
+  font-weight: 400;
 }
 
 #one-result-place:empty {
@@ -1806,24 +1826,35 @@ body.page-loading-open {
     white-space: normal;
   }
 
+  .page-table thead,
   .link-check thead,
   .all-spec-table thead {
     display: table-header-group;
   }
+  .page-table tr,
   .link-check tr,
   .all-spec-table tr {
     display: table-row;
   }
+  .page-table th,
+  .page-table td,
   .link-check th,
   .link-check td,
   .all-spec-table th,
   .all-spec-table td {
     display: table-cell;
   }
+  .page-table th:nth-child(2),
+  .page-table td:nth-child(2) {
+    width: 92px;
+    white-space: nowrap;
+    text-align: center;
+  }
   .link-check th,
   .link-check td {
     width: 33.33%;
   }
+  .page-table td::before,
   .link-check td::before,
   .all-spec-table td::before {
     content: none;

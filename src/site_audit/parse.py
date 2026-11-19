@@ -1174,6 +1174,38 @@ def decode_html(body: bytes, content_type: str) -> str:
     return body.decode("utf-8", errors="replace")
 
 
+class _PageTitle(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._in_title = False
+        self._parts: list[str] = []
+        self.done = False
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag.lower() == "title" and not self.done:
+            self._in_title = True
+            self._parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "title" and self._in_title:
+            self._in_title = False
+            self.done = True
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self._parts.append(data)
+
+
+def page_title(html: str) -> str:
+    parser = _PageTitle()
+    try:
+        parser.feed(html or "")
+        parser.close()
+    except Exception:
+        return ""
+    return " ".join("".join(parser._parts).split())
+
+
 class _SpecEl:
     def __init__(self, tag: str, classes: set[str], attrs: dict | None = None) -> None:
         self.tag = tag

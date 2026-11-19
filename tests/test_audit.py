@@ -1559,6 +1559,26 @@ class AuditTests(unittest.TestCase):
             "https://www.energy.gov/energysaver/water heating#:~:text=Water%20heating",
         )
 
+    def test_page_check_keeps_document_title(self):
+        from site_audit.audit import check_page_assets
+        from site_audit.parse import page_title
+
+        self.assertEqual(page_title("<title>LG &amp; OLED</title>"), "LG & OLED")
+        root = "https://example.com/uk/oled/"
+        home = "<html><head><title>OLED TV | LG UK</title></head><body></body></html>"
+
+        def fake(url, read_body=True, body=None):
+            return HttpResult(url=url, status=200, content_type="text/html", body=home.encode())
+
+        with patch("site_audit.audit.check_url", return_value=type("T", (), {
+            "url": root,
+            "hostname": "example.com",
+        })()):
+            checked = check_page_assets(root, rules={"path_contains": {}}, fetch_one=fake, kind="일반")
+
+        self.assertTrue(checked["ok"])
+        self.assertEqual(checked["title"], "OLED TV | LG UK")
+
     def test_missing_page_is_404(self):
         from site_audit.audit import check_page_assets
 
