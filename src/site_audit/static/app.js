@@ -539,6 +539,12 @@ function checkHasRed(payload) {
     }
     if ((listing.duplicates || []).length) return true;
   }
+  if (payload.dimension === "empty") return true;
+  if (
+    Object.prototype.hasOwnProperty.call(payload, "ufn") &&
+    !String(payload.ufn || "").trim()
+  )
+    return true;
   return languageDiffers(payload);
 }
 
@@ -828,20 +834,24 @@ function isInsightListing(url) {
 const pageChecks = new Map();
 const storedChecks = new Map();
 
-function loadPageCheck(url) {
+function loadPageCheck(url, kind) {
   const existing = pageChecks.get(url);
   if (existing) return existing.promise;
   const controller = new AbortController();
+  const body = { url };
+  if (kind) body.kind = kind;
   const promise = fetch("/api/page-check", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
+    body: JSON.stringify(body),
     signal: controller.signal,
   }).then(async (response) => {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       if (payload.status === 404) return { ok: false, status: 404, url };
-      throw new Error(payload.message || "이 페이지를 확인하지 못했습니다.");
+      const failure = new Error(payload.message || "이 페이지를 확인하지 못했습니다.");
+      failure.retryIn = Number(payload.retryIn) || 0;
+      throw failure;
     }
     return payload;
   });
@@ -1371,6 +1381,7 @@ let assetCurrent = "";
 let assetDone = 0;
 let assetTotal = 0;
 let assetToken = 0;
+let assetHold = "";
 let assetActive = false;
 let assetHalted = false;
 let assetLabel = "Insights";
@@ -1582,6 +1593,8 @@ function clearAssetSlot(slot) {
   }
   slot.linkCell.title = "";
   if (slot.langCell) slot.langCell.textContent = "";
+  if (slot.dimensionCell) slot.dimensionCell.textContent = "";
+  if (slot.ufnCell) slot.ufnCell.textContent = "";
   paintListingGap(slot);
 }
 
@@ -1589,6 +1602,8 @@ function paintAssetWait(slot, label) {
   slot.linkCell.textContent = label;
   slot.imageCell.textContent = label;
   if (slot.langCell) slot.langCell.textContent = label;
+  if (slot.dimensionCell) slot.dimensionCell.textContent = label;
+  if (slot.ufnCell) slot.ufnCell.textContent = label;
   if (slot.plp && slot.countCell) slot.countCell.textContent = label;
   if (slot.listing) {
     slot.thumbCell.textContent = label;
@@ -1621,6 +1636,10 @@ function paintAssetResult(slot, payload) {
   }
   slot.linkCell.replaceChildren(linkLines);
   slot.imageCell.replaceChildren(imageLines);
+  if (slot.dimensionCell && Object.prototype.hasOwnProperty.call(payload, "dimension"))
+    paintDimension(slot.dimensionCell, payload.dimension);
+  if (slot.ufnCell && Object.prototype.hasOwnProperty.call(payload, "ufn"))
+    paintOneUfn(slot.ufnCell, payload.ufn);
   slot.linkCell.title = "";
   paintItemCount(slot, payload);
   paintListing(slot, payload);
@@ -1632,6 +1651,8 @@ function paintAsset404(slot) {
   const cells = [slot.linkCell, slot.imageCell];
   if (slot.plp && slot.countCell) cells.push(slot.countCell);
   if (slot.listing) cells.push(slot.thumbCell, slot.dupCell);
+  if (slot.dimensionCell) cells.push(slot.dimensionCell);
+  if (slot.ufnCell) cells.push(slot.ufnCell);
   for (const cell of cells) {
     const mark = document.createElement("span");
     mark.className = "count-num is-bad";
@@ -1656,6 +1677,8 @@ function paintAssetFailed(slot, message) {
   }
   slot.linkCell.title = message || "이 페이지를 확인하지 못했습니다.";
   if (slot.langCell) slot.langCell.textContent = "";
+  if (slot.dimensionCell) slot.dimensionCell.textContent = "";
+  if (slot.ufnCell) slot.ufnCell.textContent = "";
   paintListingGap(slot);
 }
 
@@ -1765,7 +1788,9 @@ function showAssetStatus() {
   }
   const live = assetDone < assetTotal;
   line.classList.toggle("is-live", live);
-  line.textContent = live
+  line.textContent = live && assetHold
+    ? `${assetHold} ${assetDone}/${assetTotal}`
+    : live
     ? `${assetLabel} 검수 중 ${assetDone}/${assetTotal}`
     : `${assetLabel} 검수가 끝났습니다. ${assetTotal}페이지`;
   if (assetActive) {
@@ -1800,6 +1825,8 @@ function watchAssetCells(
   dupCell,
   countCell,
   langCell,
+  dimensionCell,
+  ufnCell,
   node,
 ) {
   if (!node.url || displayKind(node) === "기타") return;
@@ -1817,6 +1844,9 @@ function watchAssetCells(
     discontinuedCount: Number.isFinite(node.discontinuedCount)
       ? node.discontinuedCount
       : null,
+    dimensionCell: displayKind(node) === "PDP" ? dimensionCell : null,
+    ufnCell: displayKind(node) === "PDP" ? ufnCell : null,
+    pdp: displayKind(node) === "PDP",
     listing: isInsightListing(node.url),
     insight: node.kind === "Insights" || isInsightListing(node.url),
     plp: displayKind(node) === "PLP",
@@ -1861,12 +1891,14 @@ function pumpAssetQueue(token) {
     return;
   }
   const url = assetQueue.shift();
+  assetHold = "";
   assetCurrent = url;
   assetActive = true;
   for (const slot of slotsFor(url)) paintAssetWait(slot, "검수 중");
   syncRowActions();
   showAssetStatus();
-  loadPageCheck(url).then(
+  const pdp = slotsFor(url).some((slot) => slot.pdp);
+  loadPageCheck(url, pdp ? "PDP" : "").then(
     (payload) => {
       if (token !== assetToken) return;
       pageChecks.delete(url);
@@ -1880,6 +1912,17 @@ function pumpAssetQueue(token) {
     (error) => {
       if (token !== assetToken) return;
       pageChecks.delete(url);
+      if (error && error.retryIn > 0) {
+        // 사이트가 요청을 막으면 실패로 넘기지 않고, 풀릴 때까지 쉬었다가 같은 주소부터 이어 간다.
+        assetQueue.unshift(url);
+        assetCurrent = "";
+        assetHold = `사이트가 요청을 막아 ${error.retryIn}초 쉬는 중.`;
+        for (const slot of slotsFor(url)) paintAssetWait(slot, "대기");
+        syncRowActions();
+        showAssetStatus();
+        window.setTimeout(() => pumpAssetQueue(token), (error.retryIn + 1) * 1000);
+        return;
+      }
       assetDone += 1;
       if (assetCurrent === url) assetCurrent = "";
       if (!(error && error.name === "AbortError")) {
@@ -2112,6 +2155,8 @@ function pageTable(items, job) {
         dupCell,
         countCell,
         langCell,
+        dimensionCell,
+        ufnCell,
         checking,
       );
       const actionCell = document.createElement("td");
@@ -2261,6 +2306,24 @@ function languageText(record, payload) {
     : `다름 ${pageLanguage}`;
 }
 
+function ufnText(kind, payload) {
+  if (payload && payload.status === 404) return "404";
+  if (kind !== "PDP") return "해당 없음";
+  if (!payload || !Object.prototype.hasOwnProperty.call(payload, "ufn"))
+    return "";
+  return String(payload.ufn || "").trim() ? "있음" : "없음";
+}
+
+function dimensionText(kind, payload) {
+  if (payload && payload.status === 404) return "404";
+  if (kind !== "PDP") return "해당 없음";
+  if (!payload || !Object.prototype.hasOwnProperty.call(payload, "dimension"))
+    return "";
+  if (payload.dimension === "ok") return "있음";
+  if (payload.dimension === "empty") return "없음";
+  return "해당 없음";
+}
+
 function areaText(kind, applies, payload) {
   if (payload && payload.status === 404) return "404";
   if (!kind) return "";
@@ -2329,8 +2392,8 @@ function resultRows(record) {
       kind,
       itemQuantityText(checking, payload),
       languageText(record, payload),
-      areaText(kind, kind === "PDP", payload),
-      areaText(kind, kind === "PDP", payload),
+      ufnText(kind, payload),
+      dimensionText(kind, payload),
       payload && payload.viewports
         ? ratioLines(payload.viewports, "linkTotal", "brokenLinks")
         : payload && payload.status === 404
@@ -2988,6 +3051,34 @@ function syncCompareField() {
   if (field) field.hidden = selectedKind() !== "PDP";
 }
 
+function paintDimension(cell, state) {
+  if (!cell) return;
+  if (state !== "ok" && state !== "empty") {
+    markCheckArea(cell, false);
+    return;
+  }
+  cell.classList.remove("is-na");
+  const mark = document.createElement("span");
+  mark.className = state === "ok" ? "mark-o" : "mark-o is-bad";
+  mark.textContent = "O";
+  mark.setAttribute(
+    "aria-label",
+    state === "ok" ? "Dimension 있음" : "Dimension 없음",
+  );
+  cell.replaceChildren(mark);
+}
+
+function paintOneUfn(cell, text) {
+  cell.classList.remove("is-na");
+  const value = String(text || "").trim();
+  const mark = document.createElement("span");
+  mark.className = value ? "mark-o" : "mark-o is-bad";
+  mark.textContent = "O";
+  mark.setAttribute("aria-label", value ? `UFN 있음 ${value}` : "UFN 없음");
+  if (value) mark.title = value;
+  cell.replaceChildren(mark);
+}
+
 function paintOneLanguage(cell, language) {
   cell.classList.remove("is-na");
   const name = String(language || "").trim();
@@ -3073,8 +3164,12 @@ function renderPageCheck(payload) {
   };
   markCheckArea(langCell, true);
   if (kind === "PDP") {
-    markCheckArea(ufnCell, true);
-    markCheckArea(dimensionCell, true);
+    if (Object.prototype.hasOwnProperty.call(payload, "ufn"))
+      paintOneUfn(ufnCell, payload.ufn);
+    else markCheckArea(ufnCell, true);
+    if (Object.prototype.hasOwnProperty.call(payload, "dimension"))
+      paintDimension(dimensionCell, payload.dimension);
+    else markCheckArea(dimensionCell, true);
   }
   paintAssetResult(slot, payload);
   paintOneLanguage(langCell, payload.language);
@@ -3122,14 +3217,31 @@ function renderPageCheck(payload) {
 
 function paintEnergySheet(result, payload) {
   const sheet = payload && payload.energySheet;
-  if (!sheet || (!sheet.source && !sheet.compare)) return;
+  const compared = Boolean(payload && payload.specCompare);
+  if (!sheet || (!sheet.source && !(compared && sheet.compare))) return;
   const block = document.createElement("section");
   block.className = "all-spec energy-sheet";
   const heading = document.createElement("h3");
   heading.textContent = "Energy Sheet";
   block.append(heading);
   const table = document.createElement("table");
-  table.className = "all-spec-table is-compare";
+  table.className = compared ? "all-spec-table is-compare" : "all-spec-table";
+  const body = document.createElement("tbody");
+  const line = document.createElement("tr");
+  const name = document.createElement("th");
+  name.scope = "row";
+  name.textContent = "Energy Grade";
+  const source = document.createElement("td");
+  source.textContent = sheet.source || "없음";
+  if (!compared) {
+    if (!sheet.source) source.className = "is-empty";
+    line.append(name, source);
+    body.append(line);
+    table.append(body);
+    block.append(table);
+    result.append(block);
+    return;
+  }
   const head = document.createElement("thead");
   const titles = document.createElement("tr");
   for (const text of ["항목", "검수 페이지", "비교 페이지"]) {
@@ -3139,14 +3251,7 @@ function paintEnergySheet(result, payload) {
     titles.append(title);
   }
   head.append(titles);
-  const body = document.createElement("tbody");
-  const line = document.createElement("tr");
-  const name = document.createElement("th");
-  name.scope = "row";
-  name.textContent = "Energy Grade";
-  const source = document.createElement("td");
   source.dataset.label = "검수 페이지";
-  source.textContent = sheet.source || "없음";
   const other = document.createElement("td");
   other.dataset.label = "비교 페이지";
   other.textContent = sheet.compare || "없음";

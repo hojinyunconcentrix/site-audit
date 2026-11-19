@@ -59,6 +59,49 @@ class ParseTests(unittest.TestCase):
     def test_png_size(self):
         self.assertEqual(image_size(PNG), (1, 1))
 
+    def test_headline_ufn_reads_cmp_text(self):
+        from site_audit.parse import headline_text
+
+        html = """
+        <div class="title c-text-contents__headline font-w-light-56">
+          <h1 class="cmp-text">MULTI V i, Outdoor Unit, 22HP, R410A</h1>
+        </div>
+        <h1 class="cmp-text">다른 제목</h1>
+        """
+        self.assertEqual(
+            headline_text(html),
+            "MULTI V i, Outdoor Unit, 22HP, R410A",
+        )
+        blank = html.replace("MULTI V i, Outdoor Unit, 22HP, R410A", "  ")
+        self.assertEqual(headline_text(blank), "")
+        self.assertEqual(headline_text('<h1 class="cmp-text">제목</h1>'), "")
+
+    def test_dimension_state_needs_image_or_text(self):
+        from site_audit.parse import dimension_state
+
+        empty = """
+        <div class="c-specs-dimensions__container">
+          <div class="c-specs-dimensions__text-info text"><h4>DIMENSIONS</h4></div>
+          <div class="image c-image"><div class="cmp-image" data-cmp-data-layer=""></div></div>
+        </div>
+        """
+        filled = """
+        <div class="c-specs-dimensions__container">
+          <div class="image c-image"><div class="cmp-image"><picture>
+            <img src="/spec/size.jpg" alt="size">
+          </picture></div></div>
+        </div>
+        """
+        text = """
+        <div class="c-specs-dimensions__container">
+          <div class="image c-image"><div class="cmp-image">가로 100mm</div></div>
+        </div>
+        """
+        self.assertIsNone(dimension_state("<h4>DIMENSIONS</h4>"))
+        self.assertEqual(dimension_state(empty), "empty")
+        self.assertEqual(dimension_state(filled), "ok")
+        self.assertEqual(dimension_state(text), "ok")
+
     def test_data_src_image_is_checked(self):
         from site_audit.parse import viewport_assets
 
@@ -1866,6 +1909,12 @@ class SpecCompareTests(unittest.TestCase):
         preferred = energy_sheet_from_rows(source, rival_spec_rows(labeled), labeled)
         self.assertEqual(preferred["compare"], "A+++")
         self.assertFalse(preferred["same"])
+        empty_list = rival.replace(
+            "</h3>",
+            '</h3><div class="file-list type-gulf" data-file-download="true"></div>',
+        )
+        fallback = energy_sheet_from_rows(source, rival_spec_rows(empty_list), empty_list)
+        self.assertEqual(fallback, {"source": "D", "compare": "D", "same": True})
         changed = source.replace("Energy Grade<!-- --> : <!-- -->D", "Energy Grade<!-- --> : <!-- -->G")
         changed_sheet = energy_sheet_from_rows(changed, rival_spec_rows(rival))
         self.assertEqual(changed_sheet, {"source": "G", "compare": "D", "same": False})

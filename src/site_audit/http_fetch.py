@@ -27,12 +27,14 @@ MAX_REDIRECTS = 5
 MAX_BYTES = 2_000_000
 CONNECT_TIMEOUT = 8
 TIMEOUT = 20
-HOST_GAP = 0.4
+HOST_GAP = 1.0
+HOST_GAP_MAX = 3.0
+SLOW_GAP = 15.0
 HOST_INFLIGHT = 2
 HOST_PAUSE = 15.0
 BLOCK_PAUSE = 5.0
 HOST_STRIKES = 3
-HOST_COOLDOWN = 60.0
+HOST_COOLDOWN = 90.0
 BLOCK_STATUSES = frozenset({403, 429, 503})
 BLOCK_MESSAGE = "이 호스트가 요청을 제한했습니다."
 
@@ -210,7 +212,9 @@ class HostPacer:
         max_pause: float = HOST_PAUSE,
         strikes: int = HOST_STRIKES,
         cooldown: float = HOST_COOLDOWN,
+        slow_gap: float = SLOW_GAP,
     ):
+        self.slow_gap = slow_gap
         self.gap = gap
         self.inflight = inflight
         self.max_pause = max_pause
@@ -231,7 +235,20 @@ class HostPacer:
             return any(self._closed(state, now) for state in self._hosts.values())
 
     def _state(self, host: str) -> dict:
-        return self._hosts.setdefault(host, {"next": 0.0, "open": 0, "closed": False, "until": 0.0, "strikes": 0})
+        return self._hosts.setdefault(
+            host,
+            {"next": 0.0, "slow_next": 0.0, "open": 0, "closed": False, "until": 0.0, "strikes": 0, "gap": self.gap},
+        )
+
+    def hold_seconds(self, host: str) -> float:
+        """그 호스트가 닫혀 있으면 다시 열릴 때까지 남은 초."""
+        host = (host or "").lower()
+        with self._lock:
+            state = self._hosts.get(host)
+            now = self._clock()
+            if state is None or not self._closed(state, now):
+                return 0.0
+            return max(0.0, state["until"] - now)
 
     def _closed(self, state: dict, now: float) -> bool:
         if not state["closed"]:
@@ -243,7 +260,8 @@ class HostPacer:
         state["strikes"] = max(0, self.strikes - 1)
         return False
 
-    def acquire(self, host: str) -> str:
+    def acquire(self, host: str, *, slow: bool = False) -> str:
+        """slow는 사이트가 더 엄하게 세는 경로다. 그 경로끼리는 훨씬 긴 간격을 따로 둔다."""
         host = (host or "").lower()
         while True:
             with self._lock:
@@ -251,14 +269,17 @@ class HostPacer:
                 now = self._clock()
                 if self._closed(state, now):
                     return BLOCK_MESSAGE
-                if state["open"] < self.inflight and now >= state["next"]:
+                ready = state["next"] if not slow else max(state["next"], state["slow_next"])
+                if state["open"] < self.inflight and now >= ready:
                     state["open"] += 1
-                    state["next"] = now + self.gap
+                    state["next"] = now + state["gap"]
+                    if slow:
+                        state["slow_next"] = now + self.slow_gap
                     return ""
                 if state["open"] >= self.inflight:
                     delay = 0.02
                 else:
-                    delay = max(0.0, state["next"] - now)
+                    delay = max(0.0, ready - now)
             if delay:
                 self._sleep(delay)
 
@@ -282,6 +303,9 @@ class HostPacer:
             if status == 429 or state["strikes"] >= self.strikes:
                 state["closed"] = True
                 state["until"] = now + self.cooldown
+                # 막힌 호스트는 남은 검수 동안 더 천천히 부른다.
+                if self.gap:
+                    state["gap"] = min(max(HOST_GAP_MAX, self.gap), state["gap"] * 1.5)
                 return "stop"
             return "blocked"
 
@@ -292,6 +316,28 @@ _PACER = HostPacer()
 def reset_host_limits() -> None:
     """새 목록 수집을 시작할 때 호스트 제한을 다시 연다."""
     _PACER.reset()
+
+
+_slow_paths: tuple[str, ...] = ()
+
+
+def set_slow_paths(paths, gap: float | None = None) -> None:
+    """rules.json의 느린 경로와 그 간격을 받는다."""
+    global _slow_paths
+    _slow_paths = tuple(str(item) for item in (paths or []) if str(item))
+    if isinstance(gap, (int, float)) and gap > 0:
+        _PACER.slow_gap = float(gap)
+
+
+def is_slow(url: str) -> bool:
+    if not _slow_paths:
+        return False
+    path = urlsplit(url).path
+    return any(mark in path for mark in _slow_paths)
+
+
+def hold_seconds(host: str) -> float:
+    return _PACER.hold_seconds(host)
 
 
 def limit_notice() -> str:
@@ -350,7 +396,7 @@ def fetch(
         attempt = 0
         resent = False
         while True:
-            blocked = gate.acquire(target.hostname)
+            blocked = gate.acquire(target.hostname, slow=is_slow(target.url))
             if blocked:
                 return HttpResult(url=target.url, status=0, content_type="", body=b"", error=blocked)
             try:

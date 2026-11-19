@@ -4,6 +4,7 @@ import unittest
 
 from site_audit.audit import check_page_assets, discover_pages
 from site_audit.guard import Target
+from site_audit import http_fetch
 from site_audit.http_fetch import BLOCK_MESSAGE, HostPacer, HttpResult, _request_bytes, fetch
 
 
@@ -229,6 +230,50 @@ class HostPaceTests(unittest.TestCase):
         broken = [row["url"] for view in checked["viewports"] for row in view["brokenLinks"]]
         self.assertIn("https://example.com/gone", broken)
         self.assertNotIn("https://social.example/share", broken)
+
+    def test_stopped_host_reports_wait_and_slows_down(self):
+        clock = FakeClock()
+        pacer = HostPacer(gap=1.0, inflight=2, clock=clock.monotonic, sleep=clock.sleep, cooldown=90)
+        answer = [429]
+        started = []
+
+        def transport(target, method, read_body, body=b"", headers=None):
+            started.append(clock.now)
+            return answer[0], [], b"<p></p>"
+
+        self.assertEqual(pacer.hold_seconds("example.com"), 0)
+        fetch("https://example.com/a", resolve=_public_resolve, pacer=pacer, transport=transport)
+        self.assertEqual(pacer.hold_seconds("example.com"), 90)
+        clock.now += 30
+        self.assertEqual(pacer.hold_seconds("example.com"), 60)
+        self.assertEqual(pacer.hold_seconds("example.org"), 0)
+
+        clock.now += 60
+        answer[0] = 200
+        started.clear()
+        fetch("https://example.com/b", resolve=_public_resolve, pacer=pacer, transport=transport)
+        fetch("https://example.com/c", resolve=_public_resolve, pacer=pacer, transport=transport)
+        self.assertEqual(started[1] - started[0], 1.5)
+
+    def test_slow_paths_keep_their_own_longer_gap(self):
+        clock = FakeClock()
+        pacer = HostPacer(gap=1.0, inflight=2, clock=clock.monotonic, sleep=clock.sleep, slow_gap=15)
+        started = {}
+
+        def transport(target, method, read_body, body=b"", headers=None):
+            started[target.path] = clock.now
+            return _ok(target, method, read_body, body, headers)
+
+        kept = http_fetch._slow_paths
+        http_fetch._slow_paths = ("/support/",)
+        try:
+            for path in ("/support/a", "/business/a", "/support/b", "/business/b"):
+                fetch(f"https://example.com{path}", resolve=_public_resolve, pacer=pacer, transport=transport)
+        finally:
+            http_fetch._slow_paths = kept
+        self.assertEqual(started["/business/a"], 1.0)
+        self.assertEqual(started["/support/b"], 15.0)
+        self.assertEqual(started["/business/b"], 16.0)
 
     def test_at_most_two_connections(self):
         entered = threading.Semaphore(0)
