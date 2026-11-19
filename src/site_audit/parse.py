@@ -1268,6 +1268,83 @@ def _spec_tree(html: str) -> _SpecEl:
     return parser.root
 
 
+def _node_has_content(node: _SpecEl) -> bool:
+    for kid in node.kids:
+        if isinstance(kid, str):
+            if kid.strip():
+                return True
+            continue
+        if isinstance(kid, _SpecEl):
+            return True
+    return False
+
+
+def _dimension_image(box: _SpecEl) -> _SpecEl | None:
+    found: list[_SpecEl] = []
+
+    def visit(node: _SpecEl, in_frame: bool) -> None:
+        if found:
+            return
+        frame = in_frame or (
+            node.tag == "div" and "image" in node.classes and "c-image" in node.classes
+        )
+        if (
+            frame
+            and node is not box
+            and node.tag == "div"
+            and "cmp-image" in node.classes
+        ):
+            found.append(node)
+            return
+        for kid in node.kids:
+            if isinstance(kid, _SpecEl):
+                visit(kid, frame)
+
+    visit(box, False)
+    return found[0] if found else None
+
+
+def dimension_state(html: str) -> str | None:
+    """차원 영역. 없으면 None, 이미지나 글자가 있으면 ok, 비어 있으면 empty."""
+    boxes: list[_SpecEl] = []
+
+    def collect(node: _SpecEl) -> None:
+        if node.tag == "div" and "c-specs-dimensions__container" in node.classes:
+            boxes.append(node)
+            return
+        for kid in node.kids:
+            if isinstance(kid, _SpecEl):
+                collect(kid)
+
+    collect(_spec_tree(html or ""))
+    if not boxes:
+        return None
+    for box in boxes:
+        image = _dimension_image(box)
+        if image is None or not _node_has_content(image):
+            return "empty"
+    return "ok"
+
+
+def headline_text(html: str) -> str:
+    """상품 제목. c-text-contents__headline 안 첫 h1.cmp-text의 글자."""
+    found: list[str] = []
+
+    def visit(node: _SpecEl, in_headline: bool) -> None:
+        if found:
+            return
+        here = in_headline or "c-text-contents__headline" in node.classes
+        if here and node.tag == "h1" and "cmp-text" in node.classes:
+            found.append(_spec_plain(node).strip())
+            return
+        for kid in node.kids:
+            if isinstance(kid, _SpecEl):
+                visit(kid, here)
+
+    visit(_spec_tree(html or ""), False)
+    return found[0] if found else ""
+
+
 def _spec_plain(node) -> str:
     parts: list[str] = []
 
@@ -1357,7 +1434,7 @@ def _image_alt(node: _SpecEl) -> str:
 
 
 def _file_list_energy_alt(root: _SpecEl) -> str | None:
-    """file-list 영역이 있으면 이미지 alt. 영역이 없으면 None."""
+    """file-list 이미지 alt가 등급 문자면 그 문자. 등급이 없으면 None."""
     found: list[str] = []
 
     def visit(node: _SpecEl) -> None:
@@ -1365,8 +1442,10 @@ def _file_list_energy_alt(root: _SpecEl) -> str | None:
             return
         download = (node.attrs.get("data-file-download") or "").lower() == "true"
         if node.tag == "div" and "file-list" in node.classes and download:
-            found.append(_grade_letter(_image_alt(node)) or _clean_spec_value(_image_alt(node)))
-            return
+            letter = _grade_letter(_image_alt(node))
+            if letter:
+                found.append(letter)
+                return
         for kid in node.kids:
             if isinstance(kid, _SpecEl):
                 visit(kid)
@@ -1381,7 +1460,7 @@ def energy_sheet_from_rows(source_html: str, rival_rows: list[dict] | None, comp
     """현 사이트 Energy Grade와 비교 사이트의 에너지 등급."""
     source = _energy_grade_letter(_spec_tree(source_html or ""))
     alt = _file_list_energy_alt(_spec_tree(compare_html)) if compare_html else None
-    compare = _standard_erp_grade(rival_rows) if alt is None else alt
+    compare = alt or _standard_erp_grade(rival_rows)
     return {
         "source": source,
         "compare": compare,

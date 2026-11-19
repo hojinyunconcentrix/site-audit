@@ -282,6 +282,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {
                     "message": checked.get("message") or "이 주소는 검사할 수 없습니다.",
                     "status": checked.get("status") or 0,
+                    "retryIn": checked.get("retryIn") or 0,
                 })
                 return
             self._json(200, checked)

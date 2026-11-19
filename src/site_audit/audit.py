@@ -14,7 +14,16 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
 
 from site_audit.guard import UrlRejected, check_url
-from site_audit.http_fetch import BLOCK_MESSAGE, HttpResult, fetch, limit_notice, reset_host_limits
+from site_audit.http_fetch import (
+    BLOCK_MESSAGE,
+    HttpResult,
+    fetch,
+    hold_seconds,
+    is_slow,
+    limit_notice,
+    reset_host_limits,
+    set_slow_paths,
+)
 from site_audit.parse import (
     article_text,
     decode_html,
@@ -37,10 +46,12 @@ from site_audit.parse import (
     diff_spec_rows,
     spec_check_sections,
     energy_sheet_from_rows,
+    headline_text,
+    dimension_state,
 )
 
 MAX_PAGES = 50
-ASSET_KEEP = 600.0
+ASSET_KEEP = 3600.0
 
 # 정상으로 확인한 링크·이미지는 잠시 기억해, 페이지마다 같은 메뉴 링크를 다시 부르지 않는다.
 # 깨졌거나 확인하지 못한 주소는 기억하지 않아 다시 검수하면 새로 확인한다.
@@ -249,7 +260,17 @@ def load_rules(path: Path | None = None) -> dict:
     data.setdefault("thumbnail_min_width", None)
     data.setdefault("thumbnail_min_height", None)
     data.setdefault("plp_count_pattern", "")
+    data.setdefault("slow_paths", [])
+    data.setdefault("slow_gap", None)
+    if path is None:
+        set_slow_paths(data["slow_paths"], data["slow_gap"])
     return data
+
+
+try:
+    load_rules()
+except (OSError, ValueError):
+    pass
 
 
 def host_of(url: str) -> str:
@@ -1186,6 +1207,11 @@ def check_page_assets(root: str, *, rules: dict | None = None, fetch_one=None, r
 
     limited_hits: list[str] = []
 
+    def limited(status: int = 429) -> dict:
+        # 호스트가 닫혀 있으면 화면이 그 시간만큼 기다렸다가 같은 주소부터 이어 간다.
+        wait = hold_seconds(target.hostname) if fetch_one is None else 0.0
+        return {"ok": False, "status": status, "message": BLOCK_MESSAGE, "retryIn": int(wait + 0.999)}
+
     def request(url: str, body: bytes | None = None, headers: dict | None = None) -> HttpResult:
         if fetch_one is not None:
             if headers:
@@ -1216,7 +1242,7 @@ def check_page_assets(root: str, *, rules: dict | None = None, fetch_one=None, r
 
     page = request(target.url)
     if page.error == BLOCK_MESSAGE:
-        return {"ok": False, "status": page.status or 429, "message": BLOCK_MESSAGE}
+        return limited(page.status or 429)
     if page.status == 404:
         return {"ok": False, "status": 404, "message": "404"}
     if page.error or not (200 <= page.status <= 299):
@@ -1233,7 +1259,7 @@ def check_page_assets(root: str, *, rules: dict | None = None, fetch_one=None, r
     if chosen == "Insights" and _insight_listing(page_url):
         more_items, duplicates, content_total = _insight_more_items(page_url, html, request)
         if limited_hits:
-            return {"ok": False, "status": 429, "message": BLOCK_MESSAGE}
+            return limited()
     gathered = []
     pending: dict[str, bool] = {}
     for name, width in VIEWPORTS:
@@ -1266,8 +1292,10 @@ def check_page_assets(root: str, *, rules: dict | None = None, fetch_one=None, r
 
     states: dict[str, str] = {}
     if pending:
+        # 느린 경로는 뒤로 보내, 기다리는 동안 다른 주소 확인이 밀리지 않게 한다.
+        ordered = sorted(pending.items(), key=lambda item: is_slow(item[0]))
         with ThreadPoolExecutor(max_workers=min(6, len(pending))) as pool:
-            for url, detail in pool.map(one, pending.items()):
+            for url, detail in pool.map(one, ordered):
                 states[url] = detail
 
     viewports = []
@@ -1311,7 +1339,7 @@ def check_page_assets(root: str, *, rules: dict | None = None, fetch_one=None, r
     if chosen == "PLP":
         count, skus, siblings, active_count, discontinued_count = _plp_item_count(html, page_url, request)
         if limited_hits:
-            return {"ok": False, "status": 429, "message": BLOCK_MESSAGE}
+            return limited()
         result["itemCount"] = count
         result["itemSkus"] = skus
         result["siblingCount"] = siblings
@@ -1320,7 +1348,7 @@ def check_page_assets(root: str, *, rules: dict | None = None, fetch_one=None, r
         if isinstance(discontinued_count, int):
             result["discontinuedCount"] = discontinued_count
     if limited_hits:
-        return {"ok": False, "status": 429, "message": BLOCK_MESSAGE}
+        return limited()
     if chosen == "PDP":
         source_rows = selling_spec_rows(html)
         result["allSpec"] = {
@@ -1328,6 +1356,8 @@ def check_page_assets(root: str, *, rules: dict | None = None, fetch_one=None, r
             "sections": spec_sections(source_rows),
         }
         result["energySheet"] = energy_sheet_from_rows(html, [])
+        result["ufn"] = headline_text(html)
+        result["dimension"] = dimension_state(html)
     if chosen == "PDP" and (compare_url or "").strip():
         compared = _spec_compare_page(compare_url or "", html, request, resolve)
         sheet = compared.pop("energySheet", None)
@@ -1943,6 +1973,9 @@ def discover_pages(root: str, *, rules: dict | None = None, fetch_one=None, reso
             result = fetch(url, read_body=True, resolve=resolve, body=body, headers=headers)
         if use_cache and not getattr(result, "error", ""):
             page_cache[url] = result
+            # 목록을 모으며 정상으로 읽은 페이지는 페이지 검수에서 링크로 다시 부르지 않는다.
+            if fetch_one is None and 200 <= result.status <= 299:
+                _asset_remember(url, False)
         return result
 
     getter = fetch_one or (lambda url, read_body=True: fetch(url, read_body=read_body, resolve=resolve))

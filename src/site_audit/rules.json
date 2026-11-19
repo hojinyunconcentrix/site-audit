@@ -7,5 +7,7 @@
   "ufn_marker": "",
   "thumbnail_min_width": null,
   "thumbnail_min_height": null,
-  "plp_count_pattern": ""
+  "plp_count_pattern": "",
+  "slow_paths": ["/support/"],
+  "slow_gap": 15
 }
