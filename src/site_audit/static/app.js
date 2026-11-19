@@ -132,6 +132,7 @@ function kpiCard(label, value, tone, options) {
   again.type = "button";
   again.className = "text-btn kpi-recheck";
   again.textContent = "다시 분석";
+  again.setAttribute("aria-label", `${label} 다시 분석`);
   again.addEventListener("click", options.onRecheck);
   wrap.append(article, again);
   return wrap;
@@ -428,6 +429,7 @@ function findAnalysis(url) {
 }
 
 let listFilter = "전체";
+let recheckHold = null;
 let listedJobId = "";
 let listedJob = null;
 let listedPages = [];
@@ -449,6 +451,7 @@ function renderList(job) {
   if (jobKey !== listedJobId) {
     listedJobId = jobKey;
     listFilter = "전체";
+    recheckHold = null;
   }
   listedPages = job.pages || [];
   for (const page of listedPages) {
@@ -494,7 +497,7 @@ function paintFilters(job) {
     ["PDP", kinds.PDP, "amber"],
     ["Insights", kinds.Insights, "green"],
     ["기타", kinds["기타"], "purple"],
-    ["오류", (job.pages || []).filter(pageHasRed).length, "coral"],
+    ["오류", errorCount(job), "coral"],
     ["미검수", uncheckedCount(job), "amber"],
   ];
   summary.classList.add("filters");
@@ -511,13 +514,13 @@ function paintFilters(job) {
               ? "결과 없는 페이지만"
               : "이 유형만",
       onClick: () => {
+        if (listFilter !== label) recheckHold = null;
         listFilter = label;
         paintFilters(job);
         paintTree(job);
       },
     };
-    if (label !== "기타" && label !== "오류" && label !== "미검수")
-      options.onRecheck = () => recheckFilter(label, job);
+    if (label !== "기타") options.onRecheck = () => recheckFilter(label, job);
     summary.append(kpiCard(label, value, tone, options));
   }
 }
@@ -572,6 +575,31 @@ function pageHasRed(page) {
   return checkHasRed(storedChecks.get(page.url));
 }
 
+function errorCount(job) {
+  const pages = (job && job.pages) || [];
+  const seen = new Set();
+  let count = 0;
+  for (const page of pages) {
+    if (!pageHasRed(page)) continue;
+    count += 1;
+    if (page.url) seen.add(page.url);
+  }
+  if (!recheckHold || recheckHold.label !== "오류") return count;
+  for (const url of recheckHold.urls) {
+    if (seen.has(url)) continue;
+    seen.add(url);
+    count += 1;
+  }
+  return count;
+}
+
+function heldRecheck(page) {
+  if (!recheckHold || recheckHold.label !== listFilter) return false;
+  const node = reviewNode(page);
+  const url = (node && node.url) || (page && page.url) || "";
+  return Boolean(url && recheckHold.urls.has(url));
+}
+
 function reviewNode(page) {
   if (isGnbHeader(page) && listedJob && listedJob.url) return mainCheckNode(listedJob);
   return page;
@@ -605,7 +633,7 @@ function clearUncheckedMark(url) {
 
 function pageMatches(page) {
   if (listFilter === "전체") return true;
-  if (listFilter === "오류") return pageHasRed(page);
+  if (listFilter === "오류") return pageHasRed(page) || heldRecheck(page);
   if (listFilter === "미검수") return pageUnchecked(page);
   return displayKind(page) === listFilter;
 }
@@ -1392,6 +1420,10 @@ function persistListedChecks() {
 
 function rememberCheck(url, payload) {
   storedChecks.set(url, payload);
+  if (recheckHold) {
+    recheckHold.urls.delete(url);
+    if (!recheckHold.urls.size) recheckHold = null;
+  }
   persistListedChecks();
   if (!listedJob) return;
   clearUncheckedMark(url);
@@ -1861,6 +1893,14 @@ function pumpAssetQueue(token) {
 
 function pagesForFilter(pages, label) {
   if (label === "기타") return [];
+  if (label === "오류") {
+    return pages.filter((page) => assetPage(page) && pageHasRed(page));
+  }
+  if (label === "미검수") {
+    return pages.filter(
+      (page) => assetPage(page) && page.url && !storedChecks.has(page.url),
+    );
+  }
   return pages.filter((page) => {
     const kind = displayKind(page);
     if (!page.url || !kind || kind === "기타") return false;
@@ -1885,8 +1925,16 @@ function forgetChecks(urls) {
 function recheckFilter(label, job) {
   clearReviewHalt(job && job.id);
   const pages = pagesForFilter(pagesWithMain(job), label);
-  forgetChecks(pages.map((page) => page.url));
+  const urls = [];
+  const seen = new Set();
+  for (const page of pages) {
+    if (!page.url || seen.has(page.url)) continue;
+    seen.add(page.url);
+    urls.push(page.url);
+  }
+  forgetChecks(urls);
   listFilter = label;
+  recheckHold = label === "오류" ? { label, urls: new Set(urls) } : null;
   paintFilters(job);
   paintTree(job);
   startAssetChecks(pages, { force: true, label, announceEmpty: true });
