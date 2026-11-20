@@ -9,5 +9,5 @@
   "thumbnail_min_height": null,
   "plp_count_pattern": "",
   "slow_paths": ["/support/"],
-  "slow_gap": 15
+  "slow_gap": 5
 }
