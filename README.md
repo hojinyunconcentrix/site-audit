@@ -53,7 +53,9 @@ py --version
 
 ## 실행
 
-프로젝트 폴더(이 `README.md`가 있는 폴더)에서 실행한다.
+프로젝트 폴더(이 `README.md`와 `src` 폴더가 같이 있는 곳)에서 실행한다. 모듈 이름은 `site_audit`(밑줄)이다.
+
+`python -m site-audit`처럼 붙임표로 실행하면 `No module named site-audit`이 난다. `PYTHONPATH`에 `src`가 없으면 `No module named site_audit`이 난다. `src` 폴더 안에서 실행해도 같은 오류가 난다.
 
 macOS:
 
@@ -72,7 +74,13 @@ python -m site_audit
 
 `python`이 안 되면 `python` 대신 `py -3`을 쓴다.
 
-Windows PowerShell:
+```bat
+cd 프로젝트_폴더
+set PYTHONPATH=src
+py -3 -m site_audit
+```
+
+Windows PowerShell에서는 `set`이 동작하지 않는다. 아래를 쓴다.
 
 ```powershell
 cd 프로젝트_폴더
